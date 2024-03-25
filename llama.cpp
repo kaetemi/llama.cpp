@@ -14653,6 +14653,176 @@ bool llama_save_session_file(struct llama_context * ctx, const char * path_sessi
     return true;
 }
 
+size_t llama_copy_slot_state_data(struct llama_context * ctx, uint8_t * dst, llama_seq_id seq_id) {
+    llama_data_buffer_context data_ctx(dst);
+
+    // Write the seq_id
+    data_ctx.write(&seq_id, sizeof(seq_id));
+
+    // Count the number of cells with the specified seq_id
+    uint32_t cell_count = 0;
+    const auto & kv_self = ctx->kv_self;
+    for (uint32_t i = 0; i < kv_self.size; ++i) {
+        const auto & cell = kv_self.cells[i];
+        if (cell.seq_id.count(seq_id) > 0) {
+            ++cell_count;
+        }
+    }
+
+    // Write the cell count
+    data_ctx.write(&cell_count, sizeof(cell_count));
+
+    // Copy the KV cache cells with the specified seq_id
+    const auto & hparams = ctx->model.hparams;
+
+    const uint32_t n_layer = hparams.n_layer;
+    const uint32_t n_embd_k_gqa = hparams.n_embd_k_gqa() + hparams.n_embd_k_s();
+    const uint32_t n_embd_v_gqa = hparams.n_embd_v_gqa() + hparams.n_embd_v_s();
+
+    for (uint32_t i = 0; i < kv_self.size; ++i) {
+        const auto & cell = kv_self.cells[i];
+        if (cell.seq_id.count(seq_id) > 0) {
+            // Copy the cell data for the specified seq_id
+            data_ctx.write(&cell.pos, sizeof(cell.pos));
+
+            for (int il = 0; il < (int) n_layer; ++il) {
+                const size_t k_size = ggml_row_size(kv_self.k_l[il]->type, n_embd_k_gqa);
+
+                std::vector<uint8_t> tmp_buf(k_size);
+                ggml_backend_tensor_get(kv_self.k_l[il], tmp_buf.data(), i*k_size, k_size);
+                data_ctx.write(tmp_buf.data(), tmp_buf.size());
+
+                const size_t v_size = ggml_row_size(kv_self.v_l[il]->type, n_embd_v_gqa);
+
+                tmp_buf.resize(v_size);
+                ggml_backend_tensor_get(kv_self.v_l[il], tmp_buf.data(), i*v_size, v_size);
+                data_ctx.write(tmp_buf.data(), tmp_buf.size());
+            }
+        }
+    }
+
+    return data_ctx.get_size_written();
+}
+
+size_t llama_set_slot_state_data(struct llama_context * ctx, const uint8_t * src, llama_seq_id dest_seq_id) {
+    const uint8_t * inp = src;
+
+    // Read the source seq_id
+    llama_seq_id src_seq_id;
+    memcpy(&src_seq_id, inp, sizeof(src_seq_id));
+    inp += sizeof(src_seq_id);
+
+    // Read the cell count
+    uint32_t cell_count;
+    memcpy(&cell_count, inp, sizeof(cell_count));
+    inp += sizeof(cell_count);
+
+    // Set the KV cache cells with the source seq_id to the destination seq_id
+    auto & kv_self = ctx->kv_self;
+    const auto & hparams = ctx->model.hparams;
+
+    const uint32_t n_layer = hparams.n_layer;
+    const uint32_t n_embd_k_gqa = hparams.n_embd_k_gqa() + hparams.n_embd_k_s();
+    const uint32_t n_embd_v_gqa = hparams.n_embd_v_gqa() + hparams.n_embd_v_s();
+
+    std::vector<bool> updated_cells(kv_self.size, false);
+
+    for (uint32_t i = 0; i < cell_count; ++i) {
+        llama_pos pos;
+        memcpy(&pos, inp, sizeof(pos));
+        inp += sizeof(pos);
+
+        uint32_t cell_index = kv_self.size;
+
+        // Search for an existing cell with the destination seq_id and no other seq_ids
+        for (uint32_t j = 0; j < kv_self.size; ++j) {
+            if (kv_self.cells[j].seq_id.size() == 1 && kv_self.cells[j].has_seq_id(dest_seq_id)) {
+                cell_index = j;
+                break;
+            }
+        }
+
+        // If no existing cell found or the found cell has multiple seq_ids, allocate a new one
+        if (cell_index == kv_self.size) {
+            if (kv_self.size < kv_self.cells.size()) {
+                cell_index = kv_self.size;
+                ++kv_self.size;
+            } else {
+                // KV cache is full, overwrite the oldest cell
+                cell_index = kv_self.head;
+                kv_self.head = (kv_self.head + 1) % kv_self.cells.size();
+            }
+        }
+
+        auto & cell = kv_self.cells[cell_index];
+        cell.pos = pos;
+        cell.seq_id.clear();
+        cell.seq_id.insert(dest_seq_id);
+
+        updated_cells[cell_index] = true;
+
+        for (int il = 0; il < (int) n_layer; ++il) {
+            const size_t k_size = ggml_row_size(kv_self.k_l[il]->type, n_embd_k_gqa);
+
+            ggml_backend_tensor_set(kv_self.k_l[il], inp, cell_index*k_size, k_size);
+            inp += k_size;
+
+            const size_t v_size = ggml_row_size(kv_self.v_l[il]->type, n_embd_v_gqa);
+
+            ggml_backend_tensor_set(kv_self.v_l[il], inp, cell_index*v_size, v_size);
+            inp += v_size;
+        }
+    }
+
+    // Cleanup: Remove the destination seq_id from cells that were not updated
+    for (uint32_t i = 0; i < kv_self.size; ++i) {
+        if (!updated_cells[i]) {
+            kv_self.cells[i].seq_id.erase(dest_seq_id);
+        }
+    }
+
+    // Update kv_self.used based on the actual number of cells in use
+    kv_self.used = 0;
+    for (uint32_t i = 0; i < kv_self.size; ++i) {
+        if (!kv_self.cells[i].seq_id.empty()) {
+            ++kv_self.used;
+        }
+    }
+
+    const size_t nread = inp - src;
+    return nread;
+}
+
+size_t llama_get_slot_state_size(struct llama_context * ctx, llama_seq_id seq_id) {
+    size_t size = sizeof(seq_id);
+
+    const auto & kv_self = ctx->kv_self;
+    const auto & hparams = ctx->model.hparams;
+
+    const uint32_t n_layer = hparams.n_layer;
+    const uint32_t n_embd_k_gqa = hparams.n_embd_k_gqa() + hparams.n_embd_k_s();
+    const uint32_t n_embd_v_gqa = hparams.n_embd_v_gqa() + hparams.n_embd_v_s();
+
+    uint32_t cell_count = 0;
+
+    for (uint32_t i = 0; i < kv_self.size; ++i) {
+        const auto & cell = kv_self.cells[i];
+        if (cell.seq_id.count(seq_id) > 0) {
+            ++cell_count;
+            size += sizeof(cell.pos);
+
+            for (int il = 0; il < (int) n_layer; ++il) {
+                size += ggml_row_size(kv_self.k_l[il]->type, n_embd_k_gqa);
+                size += ggml_row_size(kv_self.v_l[il]->type, n_embd_v_gqa);
+            }
+        }
+    }
+
+    size += sizeof(cell_count);
+
+    return size;
+}
+
 void llama_set_n_threads(struct llama_context * ctx, uint32_t n_threads, uint32_t n_threads_batch) {
     ctx->cparams.n_threads       = n_threads;
     ctx->cparams.n_threads_batch = n_threads_batch;
