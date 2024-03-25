@@ -61,7 +61,9 @@ enum server_task_type {
     SERVER_TASK_TYPE_COMPLETION,
     SERVER_TASK_TYPE_CANCEL,
     SERVER_TASK_TYPE_NEXT_RESPONSE,
-    SERVER_TASK_TYPE_METRICS
+    SERVER_TASK_TYPE_METRICS,
+    SERVER_TASK_TYPE_SAVE_SLOT_STATE,
+    SERVER_TASK_TYPE_LOAD_SLOT_STATE,
 };
 
 struct server_task {
@@ -1611,6 +1613,46 @@ struct server_context {
                     }
                     queue_results.send(res);
                 } break;
+            case SERVER_TASK_TYPE_SAVE_SLOT_STATE:
+                {
+                server_slot * slot = get_slot(task.id_target);
+                if (slot == nullptr) {
+                    send_error(task, "Invalid slot ID", ERROR_TYPE_INVALID_REQUEST);
+                    break;
+                }
+
+                std::string filename = task.data["filename"];
+                size_t state_size = llama_get_slot_state_size(ctx, task.id_target + 1);
+                std::vector<uint8_t> state_data(state_size);
+                llama_copy_slot_state_data(ctx, state_data.data(), task.id_target + 1);
+
+                std::ofstream outfile(filename, std::ios::binary);
+                outfile.write(reinterpret_cast<const char*>(state_data.data()), state_size);
+                outfile.close();
+
+                server_task_result result;
+                result.id = task.id;
+                queue_results.send(result);
+            } break;
+            case SERVER_TASK_TYPE_LOAD_SLOT_STATE:
+                {
+                server_slot * slot = get_slot(task.id_target);
+                if (slot == nullptr) {
+                    send_error(task, "Invalid slot ID", ERROR_TYPE_INVALID_REQUEST);
+                    break;
+                }
+
+                std::string filename = task.data["filename"];
+                std::ifstream infile(filename, std::ios::binary);
+                std::vector<uint8_t> state_data((std::istreambuf_iterator<char>(infile)), std::istreambuf_iterator<char>());
+                infile.close();
+
+                llama_set_slot_state_data(ctx, state_data.data(), task.id_target + 1);
+
+                server_task_result result;
+                result.id = task.id;
+                queue_results.send(result);
+            } break;
         }
     }
 
@@ -3156,6 +3198,56 @@ int main(int argc, char ** argv) {
         res.status = 200; // HTTP OK
     };
 
+    const auto handle_save_slot_state = [&ctx_server, &res_error](const httplib::Request & req, httplib::Response & res) {
+        res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
+        
+        int slot_id = std::stoi(req.get_param_value("id_slot"));
+        std::string filename = json::parse(req.body)["filename"];
+        
+        server_task task;
+        task.type = SERVER_TASK_TYPE_SAVE_SLOT_STATE;
+        task.id_target = slot_id;
+        task.data = {{"filename", filename}};
+
+        const int id_task = ctx_server.queue_tasks.post(task);
+        ctx_server.queue_results.add_waiting_task_id(id_task);
+
+        server_task_result result = ctx_server.queue_results.recv(id_task);
+        ctx_server.queue_results.remove_waiting_task_id(id_task);
+
+        if (result.error) {
+            res_error(res, result.data);
+        } else {
+            json response = {{"status", "OK"}};
+            res.set_content(response.dump(), "application/json");
+        }
+    };
+
+    const auto handle_load_slot_state = [&ctx_server, &res_error](const httplib::Request & req, httplib::Response & res) {
+        res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
+        
+        int slot_id = std::stoi(req.get_param_value("id_slot"));
+        std::string filename = json::parse(req.body)["filename"];
+        
+        server_task task;
+        task.type = SERVER_TASK_TYPE_LOAD_SLOT_STATE;
+        task.id_target = slot_id;
+        task.data = {{"filename", filename}};
+
+        const int id_task = ctx_server.queue_tasks.post(task);
+        ctx_server.queue_results.add_waiting_task_id(id_task);
+
+        server_task_result result = ctx_server.queue_results.recv(id_task);
+        ctx_server.queue_results.remove_waiting_task_id(id_task);
+
+        if (result.error) {
+            res_error(res, result.data);
+        } else {
+            json response = {{"status", "OK"}};
+            res.set_content(response.dump(), "application/json");
+        }
+    };
+
     const auto handle_props = [&ctx_server](const httplib::Request & req, httplib::Response & res) {
         res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
         json data = {
@@ -3518,6 +3610,8 @@ int main(int argc, char ** argv) {
     svr->Post("/v1/embeddings",       handle_embeddings);
     svr->Post("/tokenize",            handle_tokenize);
     svr->Post("/detokenize",          handle_detokenize);
+    svr->Post("/slot/save",           handle_save_slot_state);
+    svr->Post("/slot/restore",        handle_load_slot_state);
 
     //
     // Start the server
