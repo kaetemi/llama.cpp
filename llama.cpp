@@ -14766,6 +14766,7 @@ size_t llama_set_slot_state_data(struct llama_context * ctx, const uint8_t * src
 
     // Create the new slot entries
     llama_batch batch = llama_batch_init(cell_count, 0, 1);
+    batch.n_tokens = cell_count;
     for (uint32_t i = 0; i < cell_count; ++i) {
         llama_pos pos;
         memcpy(&pos, inp, sizeof(pos));
