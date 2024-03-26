@@ -1627,6 +1627,7 @@ struct server_context {
                 size_t state_size = llama_get_slot_state_size(ctx, task.id_target + 1);
                 std::vector<uint8_t> state_data(state_size + sizeof(size_t) + token_count * sizeof(llama_token));
                 size_t nwrite = llama_copy_slot_state_data(ctx, state_data.data(), task.id_target + 1);
+                GGML_ASSERT(nwrite <= state_size);
                 printf("nwrite: %zu\n", nwrite);
 
                 // write the cached token count of the slot->cache_tokens.size()
@@ -1640,6 +1641,7 @@ struct server_context {
                     memcpy(state_data.data() + nwrite, &token, sizeof(llama_token));
                     nwrite += sizeof(llama_token);
                 }
+                GGML_ASSERT(nwrite <= state_data.size());
 
                 std::ofstream outfile(filename, std::ios::binary);
                 outfile.write(reinterpret_cast<const char*>(state_data.data()), nwrite);
@@ -1664,6 +1666,7 @@ struct server_context {
 
                 size_t nread = llama_set_slot_state_data(ctx, state_data.data(), task.id_target + 1);
                 printf("nread: %zu\n", nread);
+                GGML_ASSERT(nread <= state_data.size());
 
                 // restore cached token values
                 size_t token_count = 0;
@@ -1672,6 +1675,7 @@ struct server_context {
                 }
                 slot->cache_tokens.resize(token_count);
                 printf("token_count: %zu\n", token_count);
+                GGML_ASSERT(nread + (token_count * sizeof(llama_token)) <= state_data.size());
 
                 // tokens are of type llama_token (an integer)
                 for (size_t i = 0; i < token_count; i++) {
@@ -1680,6 +1684,7 @@ struct server_context {
                         nread += sizeof(llama_token);
                     }
                 }
+                GGML_ASSERT(nread <= state_data.size());
 
                 server_task_result result;
                 result.id = task.id;
