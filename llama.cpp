@@ -14767,7 +14767,8 @@ size_t llama_copy_slot_state_data(struct llama_context * ctx, uint8_t * dst, lla
                 data_ctx.write(&v_size, sizeof(v_size));
 
                 tmp_buf.resize(v_size);
-                ggml_backend_tensor_get(kv_self.v_l[il], tmp_buf.data(), i * v_size, v_size);
+                ggml_tensor * v_transposed = ggml_transpose(kv_self.ctxs[il], kv_self.v_l[il]);
+                ggml_backend_tensor_get(v_transposed, tmp_buf.data(), i * v_size, v_size);
                 data_ctx.write(tmp_buf.data(), tmp_buf.size());
             }
         }
@@ -14841,8 +14842,9 @@ size_t llama_set_slot_state_data(struct llama_context * ctx, const uint8_t * src
             inp += sizeof(v_size);
             const size_t v_size_expected = ggml_row_size(kv_self.v_l[il]->type, n_embd_v_gqa);
             GGML_ASSERT(v_size == v_size_expected);
+            ggml_tensor* v_transposed = ggml_transpose(kv_self.ctxs[il], kv_self.v_l[il]);
 
-            ggml_backend_tensor_set(kv_self.v_l[il], inp, cell_index * v_size, v_size);
+            ggml_backend_tensor_set(v_transposed, inp, cell_index * v_size, v_size);
             inp += v_size;
         }
     }
