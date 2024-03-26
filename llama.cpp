@@ -14695,6 +14695,33 @@ size_t llama_copy_slot_state_data(struct llama_context * ctx, uint8_t * dst, lla
     // printf("seq_id: %u\n", seq_id);
     // data_ctx.write(&seq_id, sizeof(seq_id));
 
+
+        // copy logits
+    {
+        const size_t logits_size = ctx->logits_size;
+        printf("logits_size: %zu\n", logits_size);
+
+        
+
+        // data_ctx->write(&logits_size, sizeof(logits_size));
+        // 
+        // if (logits_size) {
+        //     data_ctx->write(ctx->logits, logits_size * sizeof(float));
+        // }
+    }
+
+    // copy embeddings
+    {
+        const size_t embeddings_size = ctx->embd_size;
+        printf("embeddings_size: %zu\n", embeddings_size);
+
+       // data_ctx->write(&embeddings_size, sizeof(embeddings_size));
+       //
+       // if (embeddings_size) {
+       //     data_ctx->write(ctx->embd, embeddings_size * sizeof(float));
+       // }
+    }
+
     // Count the number of cells with the specified seq_id
     uint32_t cell_count = 0;
     const auto & kv_self = ctx->kv_self;
