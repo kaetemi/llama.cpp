@@ -1674,6 +1674,7 @@ struct server_context {
                 size_t token_count = 0;
                 if (nread + sizeof(size_t) <= state_data.size()) {
                     token_count = *reinterpret_cast<size_t*>(state_data.data() + nread);
+                    nread += sizeof(size_t);
                 }
                 slot->cache_tokens.resize(token_count);
                 printf("token_count: %zu\n", token_count);
