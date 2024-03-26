@@ -1629,6 +1629,7 @@ struct server_context {
                 size_t nwrite = llama_copy_slot_state_data(ctx, state_data.data(), task.id_target + 1);
 
                 // write the cached token count of the slot->cache_tokens.size()
+                printf("token_count: %zu\n", token_count);
                 memcpy(state_data.data() + nwrite, &token_count, sizeof(size_t));
                 nwrite += sizeof(size_t);
 
@@ -1668,6 +1669,7 @@ struct server_context {
                     token_count = *reinterpret_cast<size_t*>(state_data.data() + nread);
                 }
                 slot->cache_tokens.resize(token_count);
+                printf("token_count: %zu\n", token_count);
 
                 // tokens are of type llama_token (an integer)
                 for (size_t i = 0; i < token_count; i++) {
