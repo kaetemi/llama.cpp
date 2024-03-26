@@ -14794,7 +14794,7 @@ size_t llama_set_slot_state_data(struct llama_context * ctx, const uint8_t * src
 }
 
 size_t llama_get_slot_state_size(struct llama_context * ctx, llama_seq_id seq_id) {
-    const size_t s_seq_id_size = sizeof(uint32_t);
+    const size_t s_seq_id_size = sizeof(llama_seq_id);
 
     const size_t s_cell_count_size = sizeof(uint32_t);
     size_t s_cell_count = 0;
@@ -14808,14 +14808,18 @@ size_t llama_get_slot_state_size(struct llama_context * ctx, llama_seq_id seq_id
         }
     }
 
-    const size_t s_kv_cell = sizeof(llama_pos) + sizeof(uint32_t) + sizeof(llama_seq_id);
+    // TODO: Calculate the size of only the needed cells instead of total_size()
+    const size_t s_kv = ctx->kv_self.total_size();
+
+    const size_t s_kv_cell = sizeof(llama_pos);
     const size_t s_kv_cells = s_cell_count * s_kv_cell;
 
     const size_t s_total = (
         s_seq_id_size +
         s_cell_count_size +
+        s_kv +
         s_kv_cells
-    );
+        );
 
     return s_total;
 }
