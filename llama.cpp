@@ -14802,6 +14802,7 @@ size_t llama_get_slot_state_size(struct llama_context * ctx, llama_seq_id seq_id
     const size_t s_seq_id_size = sizeof(llama_seq_id);
     const size_t s_cell_count_size = sizeof(uint32_t);
 
+    size_t s_cell_count = 0;
     size_t s_cell_data_size = 0;
     const auto & kv_self = ctx->kv_self;
     const auto & hparams = ctx->model.hparams;
@@ -14813,6 +14814,7 @@ size_t llama_get_slot_state_size(struct llama_context * ctx, llama_seq_id seq_id
     for (uint32_t i = 0; i < kv_self.size; ++i) {
         const auto & cell = kv_self.cells[i];
         if (cell.seq_id.count(seq_id) > 0) {
+            ++s_cell_count;
             s_cell_data_size += sizeof(llama_pos);
 
             for (int il = 0; il < (int) n_layer; ++il) {
@@ -14828,6 +14830,7 @@ size_t llama_get_slot_state_size(struct llama_context * ctx, llama_seq_id seq_id
     const size_t s_total = (
         s_seq_id_size +
         s_cell_count_size +
+        s_cell_count * sizeof(llama_pos) +
         s_cell_data_size
         );
 
