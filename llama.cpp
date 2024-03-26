@@ -14793,7 +14793,7 @@ size_t llama_set_slot_state_data(struct llama_context * ctx, const uint8_t * src
                 break;
             }
         }
-        GGML_ASSERT(cell_index != kv_self.size, "cell_index not found for pos");
+        GGML_ASSERT(cell_index != kv_self.size);
 
         // Read the size and data of each layer of each cell
         for (int il = 0; il < (int) n_layer; ++il) {
@@ -14801,7 +14801,7 @@ size_t llama_set_slot_state_data(struct llama_context * ctx, const uint8_t * src
             memcpy(&k_size, inp, sizeof(k_size));
             inp += sizeof(k_size);
             const size_t k_size_expected = ggml_row_size(kv_self.k_l[il]->type, n_embd_k_gqa);
-            GGML_ASSERT(k_size == k_size_expected, "k_size mismatch");
+            GGML_ASSERT(k_size == k_size_expected);
 
             ggml_backend_tensor_set(kv_self.k_l[il], inp, cell_index * k_size, k_size);
             inp += k_size;
@@ -14810,7 +14810,7 @@ size_t llama_set_slot_state_data(struct llama_context * ctx, const uint8_t * src
             memcpy(&v_size, inp, sizeof(v_size));
             inp += sizeof(v_size);
             const size_t v_size_expected = ggml_row_size(kv_self.v_l[il]->type, n_embd_v_gqa);
-            GGML_ASSERT(v_size == v_size_expected, "v_size mismatch");
+            GGML_ASSERT(v_size == v_size_expected);
 
             ggml_backend_tensor_set(kv_self.v_l[il], inp, cell_index * v_size, v_size);
             inp += v_size;
