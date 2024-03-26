@@ -14692,7 +14692,7 @@ size_t llama_copy_slot_state_data(struct llama_context * ctx, uint8_t * dst, lla
     llama_data_buffer_context data_ctx(dst);
 
     // Write the seq_id
-    printf("seq_id: %u\n", seq_id);
+    // printf("seq_id: %u\n", seq_id);
     // data_ctx.write(&seq_id, sizeof(seq_id));
 
     // Count the number of cells with the specified seq_id
@@ -14706,7 +14706,7 @@ size_t llama_copy_slot_state_data(struct llama_context * ctx, uint8_t * dst, lla
     }
 
     // Write the cell count
-    printf("cell_count: %u\n", cell_count);
+    // printf("cell_count: %u\n", cell_count);
     data_ctx.write(&cell_count, sizeof(cell_count));
 
     // Copy the KV cache cells with the specified seq_id
@@ -14746,7 +14746,7 @@ size_t llama_copy_slot_state_data(struct llama_context * ctx, uint8_t * dst, lla
         }
     }
 
-    printf("size_written: %zu\n", data_ctx.get_size_written());
+    // printf("size_written: %zu\n", data_ctx.get_size_written());
     return data_ctx.get_size_written();
 }
 
@@ -14762,7 +14762,7 @@ size_t llama_set_slot_state_data(struct llama_context * ctx, const uint8_t * src
     uint32_t cell_count;
     memcpy(&cell_count, inp, sizeof(cell_count));
     inp += sizeof(cell_count);
-    printf("cell_count: %u\n", cell_count);
+    // printf("cell_count: %u\n", cell_count);
 
     // Create the new slot entries
     llama_batch batch = llama_batch_init(cell_count, 0, 1);
@@ -14771,7 +14771,7 @@ size_t llama_set_slot_state_data(struct llama_context * ctx, const uint8_t * src
         llama_pos pos;
         memcpy(&pos, inp, sizeof(pos));
         inp += sizeof(pos);
-        printf("pos: %u\n", pos);
+        // printf("pos: %u\n", pos);
 
         batch.pos[i] = pos;
         batch.n_seq_id[i] = 1;
@@ -14795,7 +14795,7 @@ size_t llama_set_slot_state_data(struct llama_context * ctx, const uint8_t * src
                 break;
             }
         }
-        printf("cell_index: %u\n", cell_index);
+        // printf("cell_index: %u\n", cell_index);
         GGML_ASSERT(cell_index != kv_self.size);
 
         // Read the size and data of each layer of each cell

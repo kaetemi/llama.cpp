@@ -1621,13 +1621,26 @@ struct server_context {
                     break;
                 }
 
+                const size_t token_count = slot->cache_tokens.size();
+
                 std::string filename = task.data["filename"];
                 size_t state_size = llama_get_slot_state_size(ctx, task.id_target + 1);
-                std::vector<uint8_t> state_data(state_size);
-                llama_copy_slot_state_data(ctx, state_data.data(), task.id_target + 1);
+                std::vector<uint8_t> state_data(state_size + sizeof(size_t) + token_count * sizeof(llama_token));
+                size_t nwrite = llama_copy_slot_state_data(ctx, state_data.data(), task.id_target + 1);
+
+                // write the cached token count of the slot->cache_tokens.size()
+                memcpy(state_data.data() + nwrite, &token_count, sizeof(size_t));
+                nwrite += sizeof(size_t);
+
+                // write the cached tokens (loop)
+                for (size_t i = 0; i < token_count; i++) {
+                    const llama_token token = slot->cache_tokens[i];
+                    memcpy(state_data.data() + nwrite, &token, sizeof(llama_token));
+                    nwrite += sizeof(llama_token);
+                }
 
                 std::ofstream outfile(filename, std::ios::binary);
-                outfile.write(reinterpret_cast<const char*>(state_data.data()), state_size);
+                outfile.write(reinterpret_cast<const char*>(state_data.data()), nwrite);
                 outfile.close();
 
                 server_task_result result;
@@ -1647,7 +1660,22 @@ struct server_context {
                 std::vector<uint8_t> state_data((std::istreambuf_iterator<char>(infile)), std::istreambuf_iterator<char>());
                 infile.close();
 
-                llama_set_slot_state_data(ctx, state_data.data(), task.id_target + 1);
+                size_t nread = llama_set_slot_state_data(ctx, state_data.data(), task.id_target + 1);
+
+                // restore cached token values
+                size_t token_count = 0;
+                if (nread + sizeof(size_t) <= state_data.size()) {
+                    token_count = *reinterpret_cast<size_t*>(state_data.data() + nread);
+                }
+                slot->cache_tokens.resize(token_count);
+
+                // tokens are of type llama_token (an integer)
+                for (size_t i = 0; i < token_count; i++) {
+                    if (nread + sizeof(llama_token) <= state_data.size()) {
+                        slot->cache_tokens[i] = *reinterpret_cast<llama_token*>(state_data.data() + nread);
+                        nread += sizeof(llama_token);
+                    }
+                }
 
                 server_task_result result;
                 result.id = task.id;
