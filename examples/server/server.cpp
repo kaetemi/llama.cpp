@@ -3200,10 +3200,11 @@ int main(int argc, char ** argv) {
 
     const auto handle_save_slot_state = [&ctx_server, &res_error](const httplib::Request & req, httplib::Response & res) {
         res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
-        
-        int slot_id = std::stoi(req.get_param_value("id_slot"));
-        std::string filename = json::parse(req.body)["filename"];
-        
+
+        json request_data = json::parse(req.body);
+        int slot_id = request_data["id_slot"];
+        std::string filename = request_data["filename"];
+
         server_task task;
         task.type = SERVER_TASK_TYPE_SAVE_SLOT_STATE;
         task.id_target = slot_id;
@@ -3225,10 +3226,11 @@ int main(int argc, char ** argv) {
 
     const auto handle_load_slot_state = [&ctx_server, &res_error](const httplib::Request & req, httplib::Response & res) {
         res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
-        
-        int slot_id = std::stoi(req.get_param_value("id_slot"));
-        std::string filename = json::parse(req.body)["filename"];
-        
+
+        json request_data = json::parse(req.body);
+        int slot_id = request_data["id_slot"];
+        std::string filename = request_data["filename"];
+
         server_task task;
         task.type = SERVER_TASK_TYPE_LOAD_SLOT_STATE;
         task.id_target = slot_id;

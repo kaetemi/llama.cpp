@@ -14794,33 +14794,30 @@ size_t llama_set_slot_state_data(struct llama_context * ctx, const uint8_t * src
 }
 
 size_t llama_get_slot_state_size(struct llama_context * ctx, llama_seq_id seq_id) {
-    size_t size = sizeof(seq_id);
+    const size_t s_seq_id_size = sizeof(uint32_t);
+
+    const size_t s_cell_count_size = sizeof(uint32_t);
+    size_t s_cell_count = 0;
 
     const auto & kv_self = ctx->kv_self;
-    const auto & hparams = ctx->model.hparams;
-
-    const uint32_t n_layer = hparams.n_layer;
-    const uint32_t n_embd_k_gqa = hparams.n_embd_k_gqa() + hparams.n_embd_k_s();
-    const uint32_t n_embd_v_gqa = hparams.n_embd_v_gqa() + hparams.n_embd_v_s();
-
-    uint32_t cell_count = 0;
 
     for (uint32_t i = 0; i < kv_self.size; ++i) {
         const auto & cell = kv_self.cells[i];
         if (cell.seq_id.count(seq_id) > 0) {
-            ++cell_count;
-            size += sizeof(cell.pos);
-
-            for (int il = 0; il < (int) n_layer; ++il) {
-                size += ggml_row_size(kv_self.k_l[il]->type, n_embd_k_gqa);
-                size += ggml_row_size(kv_self.v_l[il]->type, n_embd_v_gqa);
-            }
+            ++s_cell_count;
         }
     }
 
-    size += sizeof(cell_count);
+    const size_t s_kv_cell = sizeof(llama_pos) + sizeof(uint32_t) + sizeof(llama_seq_id);
+    const size_t s_kv_cells = s_cell_count * s_kv_cell;
 
-    return size;
+    const size_t s_total = (
+        s_seq_id_size +
+        s_cell_count_size +
+        s_kv_cells
+    );
+
+    return s_total;
 }
 
 void llama_set_n_threads(struct llama_context * ctx, uint32_t n_threads, uint32_t n_threads_batch) {
