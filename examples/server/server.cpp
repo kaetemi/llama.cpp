@@ -1627,6 +1627,7 @@ struct server_context {
                 size_t state_size = llama_get_slot_state_size(ctx, task.id_target + 1);
                 std::vector<uint8_t> state_data(state_size + sizeof(size_t) + token_count * sizeof(llama_token));
                 size_t nwrite = llama_copy_slot_state_data(ctx, state_data.data(), task.id_target + 1);
+                printf("nwrite: %zu\n", nwrite);
 
                 // write the cached token count of the slot->cache_tokens.size()
                 printf("token_count: %zu\n", token_count);
@@ -1662,6 +1663,7 @@ struct server_context {
                 infile.close();
 
                 size_t nread = llama_set_slot_state_data(ctx, state_data.data(), task.id_target + 1);
+                printf("nread: %zu\n", nread);
 
                 // restore cached token values
                 size_t token_count = 0;
