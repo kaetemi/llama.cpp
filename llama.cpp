@@ -2251,7 +2251,7 @@ static bool llama_kv_cache_init(
     for (auto & it : buft_layer_count) {
         int n_layers = it.second;
         struct ggml_init_params params = {
-            /*.mem_size   =*/ 2u*n_layers*ggml_tensor_overhead(),
+            /*.mem_size   =*/ 2u*n_layers*ggml_tensor_overhead() * 3,
             /*.mem_buffer =*/ NULL,
             /*.no_alloc   =*/ true,
         };
