@@ -1640,7 +1640,9 @@ struct server_context {
                     const llama_token token = slot->cache_tokens[i];
                     memcpy(state_data.data() + nwrite, &token, sizeof(llama_token));
                     nwrite += sizeof(llama_token);
+                    printf("%d, ", token);
                 }
+                printf("\n");
                 GGML_ASSERT(nwrite <= state_data.size());
 
                 std::ofstream outfile(filename, std::ios::binary);
@@ -1681,9 +1683,11 @@ struct server_context {
                 for (size_t i = 0; i < token_count; i++) {
                     if (nread + sizeof(llama_token) <= state_data.size()) {
                         slot->cache_tokens[i] = *reinterpret_cast<llama_token*>(state_data.data() + nread);
+                        printf("%d, ", slot->cache_tokens[i]);
                         nread += sizeof(llama_token);
                     }
                 }
+                printf("\n");
                 GGML_ASSERT(nread <= state_data.size());
 
                 server_task_result result;
