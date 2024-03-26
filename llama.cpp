@@ -14770,6 +14770,7 @@ size_t llama_set_slot_state_data(struct llama_context * ctx, const uint8_t * src
         llama_pos pos;
         memcpy(&pos, inp, sizeof(pos));
         inp += sizeof(pos);
+        printf("pos: %u\n", pos);
 
         batch.pos[i] = pos;
         batch.n_seq_id[i] = 1;
