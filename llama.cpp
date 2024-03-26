@@ -14793,6 +14793,7 @@ size_t llama_set_slot_state_data(struct llama_context * ctx, const uint8_t * src
                 break;
             }
         }
+        printf("cell_index: %u\n", cell_index);
         GGML_ASSERT(cell_index != kv_self.size);
 
         // Read the size and data of each layer of each cell
