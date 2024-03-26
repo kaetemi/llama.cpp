@@ -14717,12 +14717,17 @@ size_t llama_copy_slot_state_data(struct llama_context * ctx, uint8_t * dst, lla
     const uint32_t n_embd_v_gqa = hparams.n_embd_v_gqa() + hparams.n_embd_v_s();
 
     for (uint32_t i = 0; i < kv_self.size; ++i) {
-        const auto & cell = kv_self.cells[i];
+        const auto& cell = kv_self.cells[i];
         if (cell.has_seq_id(seq_id)) {
             // Write the cell position (this is the token position in the prompt)
             data_ctx.write(&cell.pos, sizeof(cell.pos));
+        }
+    }
 
-            // Write the size and data of each layer's cell
+    for (uint32_t i = 0; i < kv_self.size; ++i) {
+        const auto & cell = kv_self.cells[i];
+        if (cell.has_seq_id(seq_id)) {
+            // Write the size and data of each layer of each cell
             for (int il = 0; il < (int) n_layer; ++il) {
                 const size_t k_size = ggml_row_size(kv_self.k_l[il]->type, n_embd_k_gqa);
                 data_ctx.write(&k_size, sizeof(k_size));
@@ -14746,87 +14751,74 @@ size_t llama_copy_slot_state_data(struct llama_context * ctx, uint8_t * dst, lla
 }
 
 size_t llama_set_slot_state_data(struct llama_context * ctx, const uint8_t * src, llama_seq_id dest_seq_id) {
-    const uint8_t * inp = src;
+    auto & kv_self = ctx->kv_self;
+    
+    // Wipe the slot
+    llama_kv_cache_seq_rm(kv_self, dest_seq_id, -1, -1);
 
+    const uint8_t * inp = src;
+    
     // Read the cell count
     uint32_t cell_count;
     memcpy(&cell_count, inp, sizeof(cell_count));
     inp += sizeof(cell_count);
     printf("cell_count: %u\n", cell_count);
 
-    // Set the KV cache cells with the source seq_id to the destination seq_id
-    auto & kv_self = ctx->kv_self;
-    const auto & hparams = ctx->model.hparams;
-
-    const uint32_t n_layer = hparams.n_layer;
-
-    std::vector<bool> updated_cells(kv_self.size, false);
-
+    // Create the new slot entries
+    llama_batch batch = llama_batch_init(cell_count, 0, 1);
     for (uint32_t i = 0; i < cell_count; ++i) {
         llama_pos pos;
         memcpy(&pos, inp, sizeof(pos));
         inp += sizeof(pos);
 
-        uint32_t cell_index = kv_self.size;
+        batch.pos[i] = pos;
+        batch.n_seq_id[i] = 1;
+        batch.seq_id[i][0] = dest_seq_id;
+    }
+    llama_kv_cache_find_slot(kv_self, batch);
 
-        // Search for an existing cell with the destination seq_id and no other seq_ids
+    const auto& hparams = ctx->model.hparams;
+    const uint32_t n_layer = hparams.n_layer;
+    const uint32_t n_embd_k_gqa = hparams.n_embd_k_gqa() + hparams.n_embd_k_s();
+    const uint32_t n_embd_v_gqa = hparams.n_embd_v_gqa() + hparams.n_embd_v_s();
+
+    for (uint32_t i = 0; i < cell_count; ++i) {
+        const llama_pos pos = batch.pos[i];
+
+        // find the cell index with current seq id and specified pos
+        uint32_t cell_index = kv_self.size;
         for (uint32_t j = 0; j < kv_self.size; ++j) {
-            if (kv_self.cells[j].seq_id.size() == 1 && kv_self.cells[j].has_seq_id(dest_seq_id)) {
+            if (kv_self.cells[j].pos == pos && kv_self.cells[j].has_seq_id(dest_seq_id)) {
                 cell_index = j;
                 break;
             }
         }
+        GGML_ASSERT(cell_index != kv_self.size, "cell_index not found for pos");
 
-        // If no existing cell found or the found cell has multiple seq_ids, allocate a new one
-        if (cell_index == kv_self.size) {
-            if (kv_self.size < kv_self.cells.size()) {
-                cell_index = kv_self.size;
-                ++kv_self.size;
-            } else {
-                // KV cache is full, overwrite the oldest cell
-                cell_index = kv_self.head;
-                kv_self.head = (kv_self.head + 1) % kv_self.cells.size();
-            }
-        }
-
-        auto & cell = kv_self.cells[cell_index];
-        cell.pos = pos;
-        cell.seq_id.clear();
-        cell.seq_id.insert(dest_seq_id);
-
-        updated_cells[cell_index] = true;
-
+        // Read the size and data of each layer of each cell
         for (int il = 0; il < (int) n_layer; ++il) {
             size_t k_size;
             memcpy(&k_size, inp, sizeof(k_size));
             inp += sizeof(k_size);
+            const size_t k_size_expected = ggml_row_size(kv_self.k_l[il]->type, n_embd_k_gqa);
+            GGML_ASSERT(k_size == k_size_expected, "k_size mismatch");
 
-            ggml_backend_tensor_set(kv_self.k_l[il], inp, cell_index*k_size, k_size);
+            ggml_backend_tensor_set(kv_self.k_l[il], inp, cell_index * k_size, k_size);
             inp += k_size;
 
             size_t v_size;
             memcpy(&v_size, inp, sizeof(v_size));
             inp += sizeof(v_size);
+            const size_t v_size_expected = ggml_row_size(kv_self.v_l[il]->type, n_embd_v_gqa);
+            GGML_ASSERT(v_size == v_size_expected, "v_size mismatch");
 
-            ggml_backend_tensor_set(kv_self.v_l[il], inp, cell_index*v_size, v_size);
+            ggml_backend_tensor_set(kv_self.v_l[il], inp, cell_index * v_size, v_size);
             inp += v_size;
         }
     }
 
-    // Cleanup: Remove the destination seq_id from cells that were not updated
-    for (uint32_t i = 0; i < kv_self.size; ++i) {
-        if (!updated_cells[i]) {
-            kv_self.cells[i].seq_id.erase(dest_seq_id);
-        }
-    }
-
-    // Update kv_self.used based on the actual number of cells in use
-    kv_self.used = 0;
-    for (uint32_t i = 0; i < kv_self.size; ++i) {
-        if (!kv_self.cells[i].seq_id.empty()) {
-            ++kv_self.used;
-        }
-    }
+    // Cleanup
+    llama_batch_free(batch);
 
     const size_t nread = inp - src;
     return nread;
