@@ -14653,7 +14653,11 @@ bool llama_save_session_file(struct llama_context * ctx, const char * path_sessi
     return true;
 }
 
-size_t llama_get_slot_state_size(struct llama_context* ctx, llama_seq_id seq_id) {
+size_t llama_get_seq_size(struct llama_context* ctx, llama_seq_id seq_id) {
+    // save the size of size_t as a uint32_t for safety check
+    const size_t size_t_size_size = sizeof(uint32_t);
+
+    // other values
     const size_t s_cell_count_size = sizeof(uint32_t);
     const size_t s_layer_count_size = sizeof(uint32_t);
     const size_t n_embd_v_gqa_size = sizeof(uint32_t);
@@ -14676,7 +14680,8 @@ size_t llama_get_slot_state_size(struct llama_context* ctx, llama_seq_id seq_id)
     }
 
     for (int il = 0; il < (int)n_layer; ++il) {
-        s_cell_data_size += sizeof(size_t) * 2; // k_size_row and v_size_el values of layer
+        // k_size_row and v_size_el values of layer
+        s_cell_data_size += sizeof(size_t) * 2;
 
         // keys
         const size_t k_size_row = ggml_row_size(kv_self.k_l[il]->type, n_embd_k_gqa);
@@ -14697,12 +14702,12 @@ size_t llama_get_slot_state_size(struct llama_context* ctx, llama_seq_id seq_id)
     return s_total;
 }
 
-size_t llama_copy_slot_state_data(struct llama_context * ctx, uint8_t * dst, llama_seq_id seq_id) {
+size_t llama_copy_seq_data(struct llama_context * ctx, uint8_t * dst, llama_seq_id seq_id) {
     llama_data_buffer_context data_ctx(dst);
 
-    // Write the seq_id
-    // printf("seq_id: %u\n", seq_id);
-    // data_ctx.write(&seq_id, sizeof(seq_id));
+    // Save the size of size_t as a uint32_t for safety check
+    const uint32_t size_t_size = sizeof(size_t);
+    data_ctx.write(&size_t_size, sizeof(size_t_size));
 
     const auto& kv_self = ctx->kv_self;
     std::vector<std::pair<uint32_t, uint32_t>> cell_ranges; // ranges, from inclusive, to exclusive
@@ -14738,11 +14743,8 @@ size_t llama_copy_slot_state_data(struct llama_context * ctx, uint8_t * dst, lla
         }
         GGML_ASSERT(cell_count == cell_count_check);
     }
-    printf("num cell ranges: %u\n", (uint32_t)cell_ranges.size());
-    printf("cell count: %u\n", cell_count);
 
     // Write the cell count
-    // printf("cell_count: %u\n", cell_count);
     data_ctx.write(&cell_count, sizeof(cell_count));
 
     const auto & hparams = ctx->model.hparams;
@@ -14752,11 +14754,9 @@ size_t llama_copy_slot_state_data(struct llama_context * ctx, uint8_t * dst, lla
 
     // Write the layer count
     data_ctx.write(&n_layer, sizeof(n_layer));
-    printf("n_layer: %u\n", n_layer);
 
     // Write n_embd_v_gqa
     data_ctx.write(&n_embd_v_gqa, sizeof(n_embd_v_gqa));
-    printf("n_embd_v_gqa: %u\n", n_embd_v_gqa);
 
     // Iterate the ranges and write all the pos (this is the token position in the prompt)
     for (const auto & range : cell_ranges) {
@@ -14789,7 +14789,6 @@ size_t llama_copy_slot_state_data(struct llama_context * ctx, uint8_t * dst, lla
         // Write element size
         const size_t v_size_el = ggml_type_size(kv_self.v_l[il]->type);
         data_ctx.write(&v_size_el, sizeof(v_size_el));
-        printf("v_size_el: %u\n", (int32_t)v_size_el);
         
         // For each row, we get the element values of each cell
         for (uint32_t j = 0; j < n_embd_v_gqa; ++j) {
@@ -14802,59 +14801,24 @@ size_t llama_copy_slot_state_data(struct llama_context * ctx, uint8_t * dst, lla
                 data_ctx.write(&tmp_buf[0], tmp_buf.size());
             }
         }
-
-        /*
-        * // for reference, this moves values of nm cells starting at os to another range of cells starting at od
-        * for (uint32_t j = 0; j < n_embd_v_gqa; ++j) {
-                    memcpy(buf_v.data() + (od + j*kv_size)*v_size_el,
-                        buf_v.data() + (os + j*kv_size)*v_size_el, nm*v_size_el);
-                }
-        */
     }
 
-    // for (uint32_t i = 0; i < kv_self.size; ++i) {
-    //     const auto& cell = kv_self.cells[i];
-    //     if (cell.has_seq_id(seq_id)) {
-    //         // Write the cell position (this is the token position in the prompt)
-    //         data_ctx.write(&cell.pos, sizeof(cell.pos));
-    //     }
-    // }
-    // 
-    // for (uint32_t i = 0; i < kv_self.size; ++i) {
-    //     const auto & cell = kv_self.cells[i];
-    //     if (cell.has_seq_id(seq_id)) {
-    //         // Write the size and data of each layer of each cell
-    //         for (int il = 0; il < (int) n_layer; ++il) {
-    //             // Write the keys
-    //             const size_t k_size = ggml_row_size(kv_self.k_l[il]->type, n_embd_k_gqa);
-    //             data_ctx.write(&k_size, sizeof(k_size));
-    // 
-    //             std::vector<uint8_t> tmp_buf(k_size);
-    //             ggml_backend_tensor_get(kv_self.k_l[il], tmp_buf.data(), i * k_size, k_size);
-    //             data_ctx.write(tmp_buf.data(), tmp_buf.size());
-    // 
-    //             const size_t v_size = ggml_row_size(kv_self.v_l[il]->type, n_embd_v_gqa);
-    //             data_ctx.write(&v_size, sizeof(v_size));
-    // 
-    //             tmp_buf.resize(v_size);
-    //             ggml_tensor * v_transposed = ggml_transpose(kv_self.ctxs[il], kv_self.v_l[il]);
-    //             ggml_backend_tensor_get(v_transposed, tmp_buf.data(), i * v_size, v_size);
-    //             data_ctx.write(tmp_buf.data(), tmp_buf.size());
-    //         }
-    //     }
-    // }
-
-    // printf("size_written: %zu\n", data_ctx.get_size_written());
     return data_ctx.get_size_written();
 }
 
-size_t llama_set_slot_state_data(struct llama_context * ctx, const uint8_t * src, llama_seq_id dest_seq_id) {
+size_t llama_set_seq_data(struct llama_context * ctx, const uint8_t * src, llama_seq_id dest_seq_id) {
     auto & kv_self = ctx->kv_self;
     
     // Wipe the slot
     llama_kv_cache_seq_rm(kv_self, dest_seq_id, -1, -1);
 
     const uint8_t * inp = src;
+
+    // Read size of size_t
+    uint32_t size_t_size;
+    memcpy(&size_t_size, inp, sizeof(size_t_size));
+    inp += sizeof(size_t_size);
+    GGML_ASSERT(size_t_size == sizeof(size_t));
     
     // Read the cell count
     uint32_t cell_count;
@@ -14871,14 +14835,13 @@ size_t llama_set_slot_state_data(struct llama_context * ctx, const uint8_t * src
     memcpy(&n_embd_v_gqa_ref, inp, sizeof(n_embd_v_gqa_ref));
     inp += sizeof(n_embd_v_gqa_ref);
 
-    // Create the new slot entries
+    // Allocate the new cells for the slot
     llama_batch batch = llama_batch_init(cell_count, 0, 1);
     batch.n_tokens = cell_count;
     for (uint32_t i = 0; i < cell_count; ++i) {
         llama_pos pos;
         memcpy(&pos, inp, sizeof(pos));
         inp += sizeof(pos);
-        // printf("pos: %u\n", pos);
 
         batch.pos[i] = pos;
         batch.n_seq_id[i] = 1;
@@ -14934,58 +14897,6 @@ size_t llama_set_slot_state_data(struct llama_context * ctx, const uint8_t * src
             inp += cell_count * v_size_el;
         }
     }
-
-    // for (int il = 0; il < (int)n_layer; ++il) {
-    //     // Read row size of key
-    //     size_t k_size_row;
-    //     memcpy(&k_size_row, inp, sizeof(k_size_row));
-    //     inp += sizeof(k_size_row);
-    // 
-    //     // Read and set the keys for each cell
-    //     for (uint32_t i = 0; i < cell_count; ++i) {
-    //         ggml_backend_tensor_set(kv_self.k_l[il], inp, batch.pos[i] * k_size_row, k_size_row);
-    //         inp += k_size_row;
-    //     }
-    // }
-
-
-
-    // for (uint32_t i = 0; i < cell_count; ++i) {
-    //     const llama_pos pos = batch.pos[i];
-    // 
-    //     // find the cell index with current seq id and specified pos
-    //     uint32_t cell_index = kv_self.size;
-    //     for (uint32_t j = 0; j < kv_self.size; ++j) {
-    //         if (kv_self.cells[j].pos == pos && kv_self.cells[j].has_seq_id(dest_seq_id)) {
-    //             cell_index = j;
-    //             break;
-    //         }
-    //     }
-    //     // printf("cell_index: %u\n", cell_index);
-    //     GGML_ASSERT(cell_index != kv_self.size);
-    // 
-    //     // Read the size and data of each layer of each cell
-    //     for (int il = 0; il < (int) n_layer; ++il) {
-    //         size_t k_size;
-    //         memcpy(&k_size, inp, sizeof(k_size));
-    //         inp += sizeof(k_size);
-    //         const size_t k_size_expected = ggml_row_size(kv_self.k_l[il]->type, n_embd_k_gqa);
-    //         GGML_ASSERT(k_size == k_size_expected);
-    // 
-    //         ggml_backend_tensor_set(kv_self.k_l[il], inp, cell_index * k_size, k_size);
-    //         inp += k_size;
-    // 
-    //         size_t v_size;
-    //         memcpy(&v_size, inp, sizeof(v_size));
-    //         inp += sizeof(v_size);
-    //         const size_t v_size_expected = ggml_row_size(kv_self.v_l[il]->type, n_embd_v_gqa);
-    //         GGML_ASSERT(v_size == v_size_expected);
-    //         ggml_tensor* v_transposed = ggml_transpose(kv_self.ctxs[il], kv_self.v_l[il]);
-    // 
-    //         ggml_backend_tensor_set(v_transposed, inp, cell_index * v_size, v_size);
-    //         inp += v_size;
-    //     }
-    // }
 
     // Cleanup
     llama_batch_free(batch);

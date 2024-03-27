@@ -62,8 +62,9 @@ enum server_task_type {
     SERVER_TASK_TYPE_CANCEL,
     SERVER_TASK_TYPE_NEXT_RESPONSE,
     SERVER_TASK_TYPE_METRICS,
-    SERVER_TASK_TYPE_SAVE_SLOT_STATE,
-    SERVER_TASK_TYPE_LOAD_SLOT_STATE,
+    SERVER_TASK_TYPE_SLOT_SAVE,
+    SERVER_TASK_TYPE_SLOT_RESTORE,
+    SERVER_TASK_TYPE_SLOT_ERASE,
 };
 
 struct server_task {
@@ -1613,88 +1614,99 @@ struct server_context {
                     }
                     queue_results.send(res);
                 } break;
-            case SERVER_TASK_TYPE_SAVE_SLOT_STATE:
+            case SERVER_TASK_TYPE_SLOT_SAVE:
                 {
-                server_slot * slot = get_slot(task.id_target);
-                if (slot == nullptr) {
-                    send_error(task, "Invalid slot ID", ERROR_TYPE_INVALID_REQUEST);
-                    break;
-                }
-
-                const size_t token_count = slot->cache_tokens.size();
-
-                std::string filename = task.data["filename"];
-                size_t state_size = llama_get_slot_state_size(ctx, task.id_target + 1);
-                std::vector<uint8_t> state_data(state_size + sizeof(size_t) + token_count * sizeof(llama_token));
-                size_t nwrite = llama_copy_slot_state_data(ctx, state_data.data(), task.id_target + 1);
-                GGML_ASSERT(nwrite <= state_size);
-                printf("nwrite: %zu\n", nwrite);
-
-                // write the cached token count of the slot->cache_tokens.size()
-                printf("token_count: %zu\n", token_count);
-                memcpy(state_data.data() + nwrite, &token_count, sizeof(size_t));
-                nwrite += sizeof(size_t);
-
-                // write the cached tokens (loop)
-                for (size_t i = 0; i < token_count; i++) {
-                    const llama_token token = slot->cache_tokens[i];
-                    memcpy(state_data.data() + nwrite, &token, sizeof(llama_token));
-                    nwrite += sizeof(llama_token);
-                    printf("%d, ", token);
-                }
-                printf("\n");
-                GGML_ASSERT(nwrite <= state_data.size());
-
-                std::ofstream outfile(filename, std::ios::binary);
-                outfile.write(reinterpret_cast<const char*>(state_data.data()), nwrite);
-                outfile.close();
-
-                server_task_result result;
-                result.id = task.id;
-                queue_results.send(result);
-            } break;
-            case SERVER_TASK_TYPE_LOAD_SLOT_STATE:
-                {
-                server_slot * slot = get_slot(task.id_target);
-                if (slot == nullptr) {
-                    send_error(task, "Invalid slot ID", ERROR_TYPE_INVALID_REQUEST);
-                    break;
-                }
-
-                std::string filename = task.data["filename"];
-                std::ifstream infile(filename, std::ios::binary);
-                std::vector<uint8_t> state_data((std::istreambuf_iterator<char>(infile)), std::istreambuf_iterator<char>());
-                infile.close();
-
-                size_t nread = llama_set_slot_state_data(ctx, state_data.data(), task.id_target + 1);
-                printf("nread: %zu\n", nread);
-                GGML_ASSERT(nread <= state_data.size());
-
-                // restore cached token values
-                size_t token_count = 0;
-                if (nread + sizeof(size_t) <= state_data.size()) {
-                    token_count = *reinterpret_cast<size_t*>(state_data.data() + nread);
-                    nread += sizeof(size_t);
-                }
-                slot->cache_tokens.resize(token_count);
-                printf("token_count: %zu\n", token_count);
-                GGML_ASSERT(nread + (token_count * sizeof(llama_token)) <= state_data.size());
-
-                // tokens are of type llama_token (an integer)
-                for (size_t i = 0; i < token_count; i++) {
-                    if (nread + sizeof(llama_token) <= state_data.size()) {
-                        slot->cache_tokens[i] = *reinterpret_cast<llama_token*>(state_data.data() + nread);
-                        printf("%d, ", slot->cache_tokens[i]);
-                        nread += sizeof(llama_token);
+                    int id_slot = task.data["id_slot"];
+                    server_slot * slot = get_slot(id_slot);
+                    if (slot == nullptr) {
+                        send_error(task, "Invalid slot ID", ERROR_TYPE_INVALID_REQUEST);
+                        break;
                     }
-                }
-                printf("\n");
-                GGML_ASSERT(nread <= state_data.size());
 
-                server_task_result result;
-                result.id = task.id;
-                queue_results.send(result);
-            } break;
+                    const size_t token_count = slot->cache_tokens.size();
+
+                    std::string filename = task.data["filename"];
+                    size_t state_size = llama_get_seq_size(ctx, slot->id + 1);
+                    std::vector<uint8_t> state_data(state_size + sizeof(size_t) + token_count * sizeof(llama_token));
+                    size_t nwrite = llama_copy_seq_data(ctx, state_data.data(), slot->id + 1);
+                    GGML_ASSERT(nwrite <= state_size);
+
+                    // write the cached token count of the slot->cache_tokens.size()
+                    memcpy(state_data.data() + nwrite, &token_count, sizeof(size_t));
+                    nwrite += sizeof(size_t);
+
+                    // write the cached tokens (loop)
+                    for (size_t i = 0; i < token_count; i++) {
+                        const llama_token token = slot->cache_tokens[i];
+                        memcpy(state_data.data() + nwrite, &token, sizeof(llama_token));
+                        nwrite += sizeof(llama_token);
+                    }
+                    GGML_ASSERT(nwrite <= state_data.size());
+
+                    std::ofstream outfile(filename, std::ios::binary);
+                    outfile.write(reinterpret_cast<const char*>(state_data.data()), nwrite);
+                    outfile.close();
+
+                    server_task_result result;
+                    result.id = task.id;
+                    queue_results.send(result);
+                } break;
+            case SERVER_TASK_TYPE_SLOT_RESTORE:
+                {
+                    int id_slot = task.data["id_slot"];
+                    server_slot * slot = get_slot(id_slot);
+                    if (slot == nullptr) {
+                        send_error(task, "Invalid slot ID", ERROR_TYPE_INVALID_REQUEST);
+                        break;
+                    }
+
+                    std::string filename = task.data["filename"];
+                    std::ifstream infile(filename, std::ios::binary);
+                    std::vector<uint8_t> state_data((std::istreambuf_iterator<char>(infile)), std::istreambuf_iterator<char>());
+                    infile.close();
+
+                    size_t nread = llama_set_seq_data(ctx, state_data.data(), slot->id + 1);
+                    GGML_ASSERT(nread <= state_data.size());
+
+                    // restore cached token values
+                    size_t token_count = 0;
+                    if (nread + sizeof(size_t) <= state_data.size()) {
+                        token_count = *reinterpret_cast<size_t*>(state_data.data() + nread);
+                        nread += sizeof(size_t);
+                    }
+                    slot->cache_tokens.resize(token_count);
+                    GGML_ASSERT(nread + (token_count * sizeof(llama_token)) <= state_data.size());
+
+                    // tokens are of type llama_token (an integer)
+                    for (size_t i = 0; i < token_count; i++) {
+                        if (nread + sizeof(llama_token) <= state_data.size()) {
+                            slot->cache_tokens[i] = *reinterpret_cast<llama_token*>(state_data.data() + nread);
+                            nread += sizeof(llama_token);
+                        }
+                    }
+                    GGML_ASSERT(nread <= state_data.size());
+
+                    server_task_result result;
+                    result.id = task.id;
+                    queue_results.send(result);
+                } break;
+            case SERVER_TASK_TYPE_SLOT_ERASE:
+                {
+                    int id_slot = task.data["id_slot"];
+                    server_slot * slot = get_slot(id_slot);
+                    if (slot == nullptr) {
+                        send_error(task, "Invalid slot ID", ERROR_TYPE_INVALID_REQUEST);
+                        break;
+                    }
+
+                    // Erase token cache
+                    llama_kv_cache_seq_rm(ctx, slot->id + 1, -1, -1);
+                    slot->cache_tokens.clear();
+
+                    server_task_result result;
+                    result.id = task.id;
+                    queue_results.send(result);
+                } break;
         }
     }
 
@@ -3240,17 +3252,19 @@ int main(int argc, char ** argv) {
         res.status = 200; // HTTP OK
     };
 
-    const auto handle_save_slot_state = [&ctx_server, &res_error](const httplib::Request & req, httplib::Response & res) {
+    const auto handle_slot_save = [&ctx_server, &res_error](const httplib::Request & req, httplib::Response & res) {
         res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
 
         json request_data = json::parse(req.body);
-        int slot_id = request_data["id_slot"];
+        int id_slot = request_data["id_slot"];
         std::string filename = request_data["filename"];
 
         server_task task;
-        task.type = SERVER_TASK_TYPE_SAVE_SLOT_STATE;
-        task.id_target = slot_id;
-        task.data = {{"filename", filename}};
+        task.type = SERVER_TASK_TYPE_SLOT_SAVE;
+        task.data = {
+            { "id_slot", id_slot },
+            { "filename", filename },
+        };
 
         const int id_task = ctx_server.queue_tasks.post(task);
         ctx_server.queue_results.add_waiting_task_id(id_task);
@@ -3261,22 +3275,50 @@ int main(int argc, char ** argv) {
         if (result.error) {
             res_error(res, result.data);
         } else {
-            json response = {{"status", "OK"}};
+            json response = {{"status", "OK"}}; // TODO: include timings etc from result, filename, etc
             res.set_content(response.dump(), "application/json");
         }
     };
 
-    const auto handle_load_slot_state = [&ctx_server, &res_error](const httplib::Request & req, httplib::Response & res) {
+    const auto handle_slot_restore = [&ctx_server, &res_error](const httplib::Request & req, httplib::Response & res) {
         res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
 
         json request_data = json::parse(req.body);
-        int slot_id = request_data["id_slot"];
+        int id_slot = request_data["id_slot"];
         std::string filename = request_data["filename"];
 
         server_task task;
-        task.type = SERVER_TASK_TYPE_LOAD_SLOT_STATE;
-        task.id_target = slot_id;
-        task.data = {{"filename", filename}};
+        task.type = SERVER_TASK_TYPE_SLOT_RESTORE;
+        task.data = {
+            { "id_slot", id_slot },
+            { "filename", filename },
+        };
+
+        const int id_task = ctx_server.queue_tasks.post(task);
+        ctx_server.queue_results.add_waiting_task_id(id_task);
+
+        server_task_result result = ctx_server.queue_results.recv(id_task);
+        ctx_server.queue_results.remove_waiting_task_id(id_task);
+
+        if (result.error) {
+            res_error(res, result.data);
+        } else {
+            json response = {{"status", "OK"}}; // TODO: include timings etc from result, filename, etc
+            res.set_content(response.dump(), "application/json");
+        }
+    };
+
+    const auto handle_slot_erase = [&ctx_server, &res_error](const httplib::Request & req, httplib::Response & res) {
+        res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
+
+        json request_data = json::parse(req.body);
+        int id_slot = request_data["id_slot"];
+
+        server_task task;
+        task.type = SERVER_TASK_TYPE_SLOT_ERASE;
+        task.data = {
+            { "id_slot", id_slot },
+        };
 
         const int id_task = ctx_server.queue_tasks.post(task);
         ctx_server.queue_results.add_waiting_task_id(id_task);
@@ -3654,8 +3696,9 @@ int main(int argc, char ** argv) {
     svr->Post("/v1/embeddings",       handle_embeddings);
     svr->Post("/tokenize",            handle_tokenize);
     svr->Post("/detokenize",          handle_detokenize);
-    svr->Post("/slot/save",           handle_save_slot_state);
-    svr->Post("/slot/restore",        handle_load_slot_state);
+    svr->Post("/slot/save",           handle_slot_save);
+    svr->Post("/slot/restore",        handle_slot_restore);
+    svr->Post("/slot/erase",          handle_slot_erase);
 
     //
     // Start the server
