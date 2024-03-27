@@ -14693,6 +14693,7 @@ size_t llama_get_seq_size(struct llama_context* ctx, llama_seq_id seq_id) {
     }
 
     const size_t s_total = (
+        size_t_size_size +
         s_cell_count_size +
         s_layer_count_size +
         n_embd_v_gqa_size +
