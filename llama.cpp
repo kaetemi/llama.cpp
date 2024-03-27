@@ -14789,7 +14789,8 @@ size_t llama_copy_slot_state_data(struct llama_context * ctx, uint8_t * dst, lla
         // Write element size
         const size_t v_size_el = ggml_type_size(kv_self.v_l[il]->type);
         data_ctx.write(&v_size_el, sizeof(v_size_el));
-
+        printf("v_size_el: %u\n", (int32_t)v_size_el);
+        
         // For each row, we get the element values of each cell
         for (uint32_t j = 0; j < n_embd_v_gqa; ++j) {
             // Read each range of cells of v_size_el length each into tmp_buf and write out
@@ -14859,7 +14860,16 @@ size_t llama_set_slot_state_data(struct llama_context * ctx, const uint8_t * src
     uint32_t cell_count;
     memcpy(&cell_count, inp, sizeof(cell_count));
     inp += sizeof(cell_count);
-    // printf("cell_count: %u\n", cell_count);
+
+    // Read the layer count
+    uint32_t n_layer_ref;
+    memcpy(&n_layer_ref, inp, sizeof(n_layer_ref));
+    inp += sizeof(n_layer_ref);
+
+    // Read n_embd_v_gqa
+    uint32_t n_embd_v_gqa_ref;
+    memcpy(&n_embd_v_gqa_ref, inp, sizeof(n_embd_v_gqa_ref));
+    inp += sizeof(n_embd_v_gqa_ref);
 
     // Create the new slot entries
     llama_batch batch = llama_batch_init(cell_count, 0, 1);
@@ -14876,47 +14886,105 @@ size_t llama_set_slot_state_data(struct llama_context * ctx, const uint8_t * src
     }
     llama_kv_cache_find_slot(kv_self, batch);
 
+    // DEBUG CHECK: kv_self.head should be our first cell, kv_self.head + cell_count - 1 should be our last cell (verify seq_id and pos values)
+    // Assume that this is one contiguous block of cells
+    GGML_ASSERT(kv_self.cells[kv_self.head].pos == batch.pos[0]);
+    GGML_ASSERT(kv_self.cells[kv_self.head + cell_count - 1].pos == batch.pos[cell_count - 1]);
+    GGML_ASSERT(kv_self.cells[kv_self.head].has_seq_id(dest_seq_id));
+    GGML_ASSERT(kv_self.cells[kv_self.head + cell_count - 1].has_seq_id(dest_seq_id));
+
     const auto& hparams = ctx->model.hparams;
     const uint32_t n_layer = hparams.n_layer;
     const uint32_t n_embd_k_gqa = hparams.n_embd_k_gqa() + hparams.n_embd_k_s();
     const uint32_t n_embd_v_gqa = hparams.n_embd_v_gqa() + hparams.n_embd_v_s();
+    const uint32_t kv_size = kv_self.size;
+    const uint32_t kv_head = kv_self.head;
+    GGML_ASSERT(n_layer == n_layer_ref);
+    GGML_ASSERT(n_embd_v_gqa == n_embd_v_gqa_ref);
 
-    for (uint32_t i = 0; i < cell_count; ++i) {
-        const llama_pos pos = batch.pos[i];
+    // For each layer, read the keys for each cell, one row is one cell, read as one contiguous blo
+    for (int il = 0; il < (int)n_layer; ++il) {
+        // Read row size of key
+        size_t k_size_row_ref;
+        memcpy(&k_size_row_ref, inp, sizeof(k_size_row_ref));
+        inp += sizeof(k_size_row_ref);
+        const size_t k_size_row = ggml_row_size(kv_self.k_l[il]->type, n_embd_k_gqa);
+        GGML_ASSERT(k_size_row == k_size_row_ref);
 
-        // find the cell index with current seq id and specified pos
-        uint32_t cell_index = kv_self.size;
-        for (uint32_t j = 0; j < kv_self.size; ++j) {
-            if (kv_self.cells[j].pos == pos && kv_self.cells[j].has_seq_id(dest_seq_id)) {
-                cell_index = j;
-                break;
-            }
-        }
-        // printf("cell_index: %u\n", cell_index);
-        GGML_ASSERT(cell_index != kv_self.size);
+        // Read and set the keys for the whole cell range
+        ggml_backend_tensor_set(kv_self.k_l[il], inp, kv_head * k_size_row, cell_count * k_size_row);
+        inp += cell_count * k_size_row;
+    }
 
-        // Read the size and data of each layer of each cell
-        for (int il = 0; il < (int) n_layer; ++il) {
-            size_t k_size;
-            memcpy(&k_size, inp, sizeof(k_size));
-            inp += sizeof(k_size);
-            const size_t k_size_expected = ggml_row_size(kv_self.k_l[il]->type, n_embd_k_gqa);
-            GGML_ASSERT(k_size == k_size_expected);
+    // For each layer, read the values for each cell (transposed)
+    for (int il = 0; il < (int)n_layer; ++il) {
+        // Read element size of value
+        size_t v_size_el_ref;
+        memcpy(&v_size_el_ref, inp, sizeof(v_size_el_ref));
+        inp += sizeof(v_size_el_ref);
 
-            ggml_backend_tensor_set(kv_self.k_l[il], inp, cell_index * k_size, k_size);
-            inp += k_size;
+        const size_t v_size_el = ggml_type_size(kv_self.v_l[il]->type);
+        GGML_ASSERT(v_size_el == v_size_el_ref);
 
-            size_t v_size;
-            memcpy(&v_size, inp, sizeof(v_size));
-            inp += sizeof(v_size);
-            const size_t v_size_expected = ggml_row_size(kv_self.v_l[il]->type, n_embd_v_gqa);
-            GGML_ASSERT(v_size == v_size_expected);
-            ggml_tensor* v_transposed = ggml_transpose(kv_self.ctxs[il], kv_self.v_l[il]);
-
-            ggml_backend_tensor_set(v_transposed, inp, cell_index * v_size, v_size);
-            inp += v_size;
+        // For each row in the transposed matrix, read the values for the whole cell range
+        for (uint32_t j = 0; j < n_embd_v_gqa; ++j) {
+            const size_t dst_offset = (kv_head + j * kv_size) * v_size_el;
+            ggml_backend_tensor_set(kv_self.v_l[il], inp, dst_offset, cell_count * v_size_el);
+            inp += cell_count * v_size_el;
         }
     }
+
+    // for (int il = 0; il < (int)n_layer; ++il) {
+    //     // Read row size of key
+    //     size_t k_size_row;
+    //     memcpy(&k_size_row, inp, sizeof(k_size_row));
+    //     inp += sizeof(k_size_row);
+    // 
+    //     // Read and set the keys for each cell
+    //     for (uint32_t i = 0; i < cell_count; ++i) {
+    //         ggml_backend_tensor_set(kv_self.k_l[il], inp, batch.pos[i] * k_size_row, k_size_row);
+    //         inp += k_size_row;
+    //     }
+    // }
+
+
+
+    // for (uint32_t i = 0; i < cell_count; ++i) {
+    //     const llama_pos pos = batch.pos[i];
+    // 
+    //     // find the cell index with current seq id and specified pos
+    //     uint32_t cell_index = kv_self.size;
+    //     for (uint32_t j = 0; j < kv_self.size; ++j) {
+    //         if (kv_self.cells[j].pos == pos && kv_self.cells[j].has_seq_id(dest_seq_id)) {
+    //             cell_index = j;
+    //             break;
+    //         }
+    //     }
+    //     // printf("cell_index: %u\n", cell_index);
+    //     GGML_ASSERT(cell_index != kv_self.size);
+    // 
+    //     // Read the size and data of each layer of each cell
+    //     for (int il = 0; il < (int) n_layer; ++il) {
+    //         size_t k_size;
+    //         memcpy(&k_size, inp, sizeof(k_size));
+    //         inp += sizeof(k_size);
+    //         const size_t k_size_expected = ggml_row_size(kv_self.k_l[il]->type, n_embd_k_gqa);
+    //         GGML_ASSERT(k_size == k_size_expected);
+    // 
+    //         ggml_backend_tensor_set(kv_self.k_l[il], inp, cell_index * k_size, k_size);
+    //         inp += k_size;
+    // 
+    //         size_t v_size;
+    //         memcpy(&v_size, inp, sizeof(v_size));
+    //         inp += sizeof(v_size);
+    //         const size_t v_size_expected = ggml_row_size(kv_self.v_l[il]->type, n_embd_v_gqa);
+    //         GGML_ASSERT(v_size == v_size_expected);
+    //         ggml_tensor* v_transposed = ggml_transpose(kv_self.ctxs[il], kv_self.v_l[il]);
+    // 
+    //         ggml_backend_tensor_set(v_transposed, inp, cell_index * v_size, v_size);
+    //         inp += v_size;
+    //     }
+    // }
 
     // Cleanup
     llama_batch_free(batch);
