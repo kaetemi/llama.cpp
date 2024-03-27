@@ -1624,6 +1624,7 @@ struct server_context {
                     }
 
                     const size_t token_count = slot->cache_tokens.size();
+                    const int64_t t_start = ggml_time_us();
 
                     std::string filename = task.data["filename"];
                     size_t state_size = llama_get_seq_size(ctx, slot->id + 1);
@@ -1644,11 +1645,24 @@ struct server_context {
                     GGML_ASSERT(nwrite <= state_data.size());
 
                     std::ofstream outfile(filename, std::ios::binary);
-                    outfile.write(reinterpret_cast<const char*>(state_data.data()), nwrite);
+                    outfile.write(reinterpret_cast<const char *>(state_data.data()), nwrite);
                     outfile.close();
+
+                    const int64_t t_end = ggml_time_us();
+                    const double t_save_ms = (t_end - t_start) / 1000.0;
 
                     server_task_result result;
                     result.id = task.id;
+                    result.stop = true;
+                    result.error = false;
+                    result.data = json {
+                        { "id_slot",  id_slot },
+                        { "filename", filename },
+                        { "n_saved",  token_count },
+                        { "timings", {
+                            { "save_ms", t_save_ms }
+                        } }
+                    };
                     queue_results.send(result);
                 } break;
             case SERVER_TASK_TYPE_SLOT_RESTORE:
@@ -1660,8 +1674,15 @@ struct server_context {
                         break;
                     }
 
-                    std::string filename = task.data["filename"];
+                    const int64_t t_start = ggml_time_us();
+
+                    std::string filename = task.data["filename"]; // TODO: restrict to files in path specified in server params?
                     std::ifstream infile(filename, std::ios::binary);
+                    if (!infile.is_open()) {
+                        send_error(task, "Failed to open file", ERROR_TYPE_INVALID_REQUEST);
+                        break;
+                    }
+
                     std::vector<uint8_t> state_data((std::istreambuf_iterator<char>(infile)), std::istreambuf_iterator<char>());
                     infile.close();
 
@@ -1671,7 +1692,7 @@ struct server_context {
                     // restore cached token values
                     size_t token_count = 0;
                     if (nread + sizeof(size_t) <= state_data.size()) {
-                        token_count = *reinterpret_cast<size_t*>(state_data.data() + nread);
+                        token_count = *reinterpret_cast<size_t *>(state_data.data() + nread);
                         nread += sizeof(size_t);
                     }
                     slot->cache_tokens.resize(token_count);
@@ -1680,14 +1701,27 @@ struct server_context {
                     // tokens are of type llama_token (an integer)
                     for (size_t i = 0; i < token_count; i++) {
                         if (nread + sizeof(llama_token) <= state_data.size()) {
-                            slot->cache_tokens[i] = *reinterpret_cast<llama_token*>(state_data.data() + nread);
+                            slot->cache_tokens[i] = *reinterpret_cast<llama_token *>(state_data.data() + nread);
                             nread += sizeof(llama_token);
                         }
                     }
                     GGML_ASSERT(nread <= state_data.size());
 
+                    const int64_t t_end = ggml_time_us();
+                    const double t_restore_ms = (t_end - t_start) / 1000.0;
+
                     server_task_result result;
                     result.id = task.id;
+                    result.stop = true;
+                    result.error = false;
+                    result.data = json {
+                        { "id_slot",    id_slot },
+                        { "filename",   filename },
+                        { "n_restored", token_count },
+                        { "timings", {
+                            { "restore_ms", t_restore_ms }
+                        } }
+                    };
                     queue_results.send(result);
                 } break;
             case SERVER_TASK_TYPE_SLOT_ERASE:
@@ -1700,11 +1734,18 @@ struct server_context {
                     }
 
                     // Erase token cache
+                    const size_t n_erased = slot->cache_tokens.size();
                     llama_kv_cache_seq_rm(ctx, slot->id + 1, -1, -1);
                     slot->cache_tokens.clear();
 
                     server_task_result result;
                     result.id = task.id;
+                    result.stop = true;
+                    result.error = false;
+                    result.data = json {
+                        { "id_slot",  id_slot },
+                        { "n_erased", n_erased }
+                    };
                     queue_results.send(result);
                 } break;
         }
@@ -3275,8 +3316,7 @@ int main(int argc, char ** argv) {
         if (result.error) {
             res_error(res, result.data);
         } else {
-            json response = {{"status", "OK"}}; // TODO: include timings etc from result, filename, etc
-            res.set_content(response.dump(), "application/json");
+            res.set_content(result.data.dump(), "application/json");
         }
     };
 
@@ -3303,8 +3343,7 @@ int main(int argc, char ** argv) {
         if (result.error) {
             res_error(res, result.data);
         } else {
-            json response = {{"status", "OK"}}; // TODO: include timings etc from result, filename, etc
-            res.set_content(response.dump(), "application/json");
+            res.set_content(result.data.dump(), "application/json");
         }
     };
 
@@ -3329,8 +3368,7 @@ int main(int argc, char ** argv) {
         if (result.error) {
             res_error(res, result.data);
         } else {
-            json response = {{"status", "OK"}};
-            res.set_content(response.dump(), "application/json");
+            res.set_content(result.data, "application/json");
         }
     };
 
