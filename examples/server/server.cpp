@@ -1656,9 +1656,10 @@ struct server_context {
                     result.stop = true;
                     result.error = false;
                     result.data = json {
-                        { "id_slot",  id_slot },
-                        { "filename", filename },
-                        { "n_saved",  token_count },
+                        { "id_slot",   id_slot },
+                        { "filename",  filename },
+                        { "n_saved",   token_count }, // tokens saved
+                        { "n_written", nwrite },      // bytes written
                         { "timings", {
                             { "save_ms", t_save_ms }
                         } }
@@ -1717,7 +1718,8 @@ struct server_context {
                     result.data = json {
                         { "id_slot",    id_slot },
                         { "filename",   filename },
-                        { "n_restored", token_count },
+                        { "n_restored", token_count }, // tokens restored
+                        { "n_read",     nread },       // bytes read
                         { "timings", {
                             { "restore_ms", t_restore_ms }
                         } }
