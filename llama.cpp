@@ -14711,23 +14711,23 @@ size_t llama_copy_slot_state_data(struct llama_context * ctx, uint8_t * dst, lla
     // Count the number of cells with the specified seq_id
     // Find all the ranges of cells with this seq id
     {
-        uint32_t cell_range_begin = -1;
+        uint32_t cell_range_begin = kv_self.size;
         for (uint32_t i = 0; i < kv_self.size; ++i) {
             const auto& cell = kv_self.cells[i];
             if (cell.has_seq_id(seq_id)) {
                 ++cell_count;
-                if (cell_range_begin == -1) {
+                if (cell_range_begin == kv_self.size) {
                     cell_range_begin = i;
                 }
             }
             else {
-                if (cell_range_begin != -1) {
+                if (cell_range_begin != kv_self.size) {
                     cell_ranges.push_back({ cell_range_begin, i });
-                    cell_range_begin = -1;
+                    cell_range_begin = kv_self.size;
                 }
             }
         }
-        if (cell_range_begin != -1) {
+        if (cell_range_begin != kv_self.size) {
             cell_ranges.push_back({ cell_range_begin, kv_self.size });
         }
 
@@ -14888,6 +14888,7 @@ size_t llama_set_slot_state_data(struct llama_context * ctx, const uint8_t * src
 
     // DEBUG CHECK: kv_self.head should be our first cell, kv_self.head + cell_count - 1 should be our last cell (verify seq_id and pos values)
     // Assume that this is one contiguous block of cells
+    GGML_ASSERT(kv_self.head + cell_count <= kv_self.size);
     GGML_ASSERT(kv_self.cells[kv_self.head].pos == batch.pos[0]);
     GGML_ASSERT(kv_self.cells[kv_self.head + cell_count - 1].pos == batch.pos[cell_count - 1]);
     GGML_ASSERT(kv_self.cells[kv_self.head].has_seq_id(dest_seq_id));
