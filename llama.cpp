@@ -14655,6 +14655,8 @@ bool llama_save_session_file(struct llama_context * ctx, const char * path_sessi
 
 size_t llama_get_slot_state_size(struct llama_context* ctx, llama_seq_id seq_id) {
     const size_t s_cell_count_size = sizeof(uint32_t);
+    const size_t s_layer_count_size = sizeof(uint32_t);
+    const size_t n_embd_v_gqa_size = sizeof(uint32_t);
 
     size_t s_cell_count = 0;
     size_t s_cell_data_size = 0;
@@ -14674,14 +14676,21 @@ size_t llama_get_slot_state_size(struct llama_context* ctx, llama_seq_id seq_id)
     }
 
     for (int il = 0; il < (int)n_layer; ++il) {
-        const size_t k_size = ggml_row_size(kv_self.k_l[il]->type, n_embd_k_gqa);
-        const size_t v_size = ggml_row_size(kv_self.v_l[il]->type, n_embd_v_gqa);
-        s_cell_data_size += (sizeof(size_t) + k_size) * s_cell_count;
-        s_cell_data_size += (sizeof(size_t) + v_size) * s_cell_count;
+        s_cell_data_size += sizeof(size_t) * 2; // k_size_row and v_size_el values of layer
+
+        // keys
+        const size_t k_size_row = ggml_row_size(kv_self.k_l[il]->type, n_embd_k_gqa);
+        s_cell_data_size += k_size_row * s_cell_count;
+
+        // values (transposed)
+        const size_t v_size_el = ggml_type_size(kv_self.v_l[il]->type);
+        s_cell_data_size += v_size_el * s_cell_count * n_embd_v_gqa;
     }
 
     const size_t s_total = (
         s_cell_count_size +
+        s_layer_count_size +
+        n_embd_v_gqa_size +
         s_cell_data_size
         );
 
@@ -14695,84 +14704,144 @@ size_t llama_copy_slot_state_data(struct llama_context * ctx, uint8_t * dst, lla
     // printf("seq_id: %u\n", seq_id);
     // data_ctx.write(&seq_id, sizeof(seq_id));
 
-
-        // copy logits
-    {
-        const size_t logits_size = ctx->logits_size;
-        printf("logits_size: %zu\n", logits_size);
-
-        
-
-        // data_ctx->write(&logits_size, sizeof(logits_size));
-        // 
-        // if (logits_size) {
-        //     data_ctx->write(ctx->logits, logits_size * sizeof(float));
-        // }
-    }
-
-    // copy embeddings
-    {
-        const size_t embeddings_size = ctx->embd_size;
-        printf("embeddings_size: %zu\n", embeddings_size);
-
-       // data_ctx->write(&embeddings_size, sizeof(embeddings_size));
-       //
-       // if (embeddings_size) {
-       //     data_ctx->write(ctx->embd, embeddings_size * sizeof(float));
-       // }
-    }
+    const auto& kv_self = ctx->kv_self;
+    std::vector<std::pair<uint32_t, uint32_t>> cell_ranges; // ranges, from inclusive, to exclusive
+    uint32_t cell_count = 0;
 
     // Count the number of cells with the specified seq_id
-    uint32_t cell_count = 0;
-    const auto & kv_self = ctx->kv_self;
-    for (uint32_t i = 0; i < kv_self.size; ++i) {
-        const auto & cell = kv_self.cells[i];
-        if (cell.has_seq_id(seq_id)) {
-            ++cell_count;
+    // Find all the ranges of cells with this seq id
+    {
+        uint32_t cell_range_begin = -1;
+        for (uint32_t i = 0; i < kv_self.size; ++i) {
+            const auto& cell = kv_self.cells[i];
+            if (cell.has_seq_id(seq_id)) {
+                ++cell_count;
+                if (cell_range_begin == -1) {
+                    cell_range_begin = i;
+                }
+            }
+            else {
+                if (cell_range_begin != -1) {
+                    cell_ranges.push_back({ cell_range_begin, i });
+                    cell_range_begin = -1;
+                }
+            }
         }
+        if (cell_range_begin != -1) {
+            cell_ranges.push_back({ cell_range_begin, kv_self.size });
+        }
+
+        // DEBUG CHECK: Sum of cell counts in ranges should equal the total cell count
+        uint32_t cell_count_check = 0;
+        for (const auto& range : cell_ranges) {
+            cell_count_check += range.second - range.first;
+        }
+        GGML_ASSERT(cell_count == cell_count_check);
     }
+    printf("num cell ranges: %u\n", (uint32_t)cell_ranges.size());
+    printf("cell count: %u\n", cell_count);
 
     // Write the cell count
     // printf("cell_count: %u\n", cell_count);
     data_ctx.write(&cell_count, sizeof(cell_count));
 
-    // Copy the KV cache cells with the specified seq_id
     const auto & hparams = ctx->model.hparams;
-
     const uint32_t n_layer = hparams.n_layer;
     const uint32_t n_embd_k_gqa = hparams.n_embd_k_gqa() + hparams.n_embd_k_s();
     const uint32_t n_embd_v_gqa = hparams.n_embd_v_gqa() + hparams.n_embd_v_s();
 
-    for (uint32_t i = 0; i < kv_self.size; ++i) {
-        const auto& cell = kv_self.cells[i];
-        if (cell.has_seq_id(seq_id)) {
-            // Write the cell position (this is the token position in the prompt)
+    // Write the layer count
+    data_ctx.write(&n_layer, sizeof(n_layer));
+    printf("n_layer: %u\n", n_layer);
+
+    // Write n_embd_v_gqa
+    data_ctx.write(&n_embd_v_gqa, sizeof(n_embd_v_gqa));
+    printf("n_embd_v_gqa: %u\n", n_embd_v_gqa);
+
+    // Iterate the ranges and write all the pos (this is the token position in the prompt)
+    for (const auto & range : cell_ranges) {
+        for (uint32_t i = range.first; i < range.second; ++i) {
+            const auto & cell = kv_self.cells[i];
             data_ctx.write(&cell.pos, sizeof(cell.pos));
         }
     }
 
-    for (uint32_t i = 0; i < kv_self.size; ++i) {
-        const auto & cell = kv_self.cells[i];
-        if (cell.has_seq_id(seq_id)) {
-            // Write the size and data of each layer of each cell
-            for (int il = 0; il < (int) n_layer; ++il) {
-                const size_t k_size = ggml_row_size(kv_self.k_l[il]->type, n_embd_k_gqa);
-                data_ctx.write(&k_size, sizeof(k_size));
+    // Iterate and write all the keys first, each row is a cell
+    // Get whole range at a time
+    std::vector<uint8_t> tmp_buf;
+    for (int il = 0; il < (int)n_layer; ++il) {
+        // Write row size of key
+        const size_t k_size_row = ggml_row_size(kv_self.k_l[il]->type, n_embd_k_gqa);
+        data_ctx.write(&k_size_row, sizeof(k_size_row));
 
-                std::vector<uint8_t> tmp_buf(k_size);
-                ggml_backend_tensor_get(kv_self.k_l[il], tmp_buf.data(), i * k_size, k_size);
-                data_ctx.write(tmp_buf.data(), tmp_buf.size());
-
-                const size_t v_size = ggml_row_size(kv_self.v_l[il]->type, n_embd_v_gqa);
-                data_ctx.write(&v_size, sizeof(v_size));
-
-                tmp_buf.resize(v_size);
-                ggml_tensor * v_transposed = ggml_transpose(kv_self.ctxs[il], kv_self.v_l[il]);
-                ggml_backend_tensor_get(v_transposed, tmp_buf.data(), i * v_size, v_size);
-                data_ctx.write(tmp_buf.data(), tmp_buf.size());
-            }
+        // Read each range of cells of k_size length each into tmp_buf and write out
+        for (const auto & range : cell_ranges) {
+            const size_t range_size = range.second - range.first;
+            tmp_buf.resize(range_size * k_size_row);
+            ggml_backend_tensor_get(kv_self.k_l[il], tmp_buf.data(), range.first * k_size_row, range_size * k_size_row);
+            data_ctx.write(&tmp_buf[0], tmp_buf.size());
         }
     }
+
+    // For the values, they are transposed, so we also need the element size and get the element ranges from each row
+    const uint32_t kv_size = kv_self.size;
+    for (int il = 0; il < (int)n_layer; ++il) {
+        // Write element size
+        const size_t v_size_el = ggml_type_size(kv_self.v_l[il]->type);
+        data_ctx.write(&v_size_el, sizeof(v_size_el));
+
+        // For each row, we get the element values of each cell
+        for (uint32_t j = 0; j < n_embd_v_gqa; ++j) {
+            // Read each range of cells of v_size_el length each into tmp_buf and write out
+            for (const auto & range : cell_ranges) {
+                const size_t range_size = range.second - range.first;
+                const size_t src_offset = (range.first + j * kv_size) * v_size_el;
+                tmp_buf.resize(range_size * v_size_el);
+                ggml_backend_tensor_get(kv_self.v_l[il], tmp_buf.data(), src_offset, tmp_buf.size());
+                data_ctx.write(&tmp_buf[0], tmp_buf.size());
+            }
+        }
+
+        /*
+        * // for reference, this moves values of nm cells starting at os to another range of cells starting at od
+        * for (uint32_t j = 0; j < n_embd_v_gqa; ++j) {
+                    memcpy(buf_v.data() + (od + j*kv_size)*v_size_el,
+                        buf_v.data() + (os + j*kv_size)*v_size_el, nm*v_size_el);
+                }
+        */
+    }
+
+    // for (uint32_t i = 0; i < kv_self.size; ++i) {
+    //     const auto& cell = kv_self.cells[i];
+    //     if (cell.has_seq_id(seq_id)) {
+    //         // Write the cell position (this is the token position in the prompt)
+    //         data_ctx.write(&cell.pos, sizeof(cell.pos));
+    //     }
+    // }
+    // 
+    // for (uint32_t i = 0; i < kv_self.size; ++i) {
+    //     const auto & cell = kv_self.cells[i];
+    //     if (cell.has_seq_id(seq_id)) {
+    //         // Write the size and data of each layer of each cell
+    //         for (int il = 0; il < (int) n_layer; ++il) {
+    //             // Write the keys
+    //             const size_t k_size = ggml_row_size(kv_self.k_l[il]->type, n_embd_k_gqa);
+    //             data_ctx.write(&k_size, sizeof(k_size));
+    // 
+    //             std::vector<uint8_t> tmp_buf(k_size);
+    //             ggml_backend_tensor_get(kv_self.k_l[il], tmp_buf.data(), i * k_size, k_size);
+    //             data_ctx.write(tmp_buf.data(), tmp_buf.size());
+    // 
+    //             const size_t v_size = ggml_row_size(kv_self.v_l[il]->type, n_embd_v_gqa);
+    //             data_ctx.write(&v_size, sizeof(v_size));
+    // 
+    //             tmp_buf.resize(v_size);
+    //             ggml_tensor * v_transposed = ggml_transpose(kv_self.ctxs[il], kv_self.v_l[il]);
+    //             ggml_backend_tensor_get(v_transposed, tmp_buf.data(), i * v_size, v_size);
+    //             data_ctx.write(tmp_buf.data(), tmp_buf.size());
+    //         }
+    //     }
+    // }
 
     // printf("size_written: %zu\n", data_ctx.get_size_written());
     return data_ctx.get_size_written();
