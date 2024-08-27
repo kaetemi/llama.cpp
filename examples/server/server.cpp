@@ -2727,12 +2727,7 @@ int main(int argc, char ** argv) {
             }
         }
 
-        try {
-            res.set_content(result.data.at("slots").dump(), MIMETYPE_JSON);
-        } catch (const std::exception & e) {
-            res_error(res, format_error_response(std::string("\"set_content\": ") + e.what(), ERROR_TYPE_SERVER));
-            return;
-        }
+        res.set_content(result.data.at("slots").dump(), MIMETYPE_JSON);
         res.status = 200; // HTTP OK
     };
 
@@ -2976,7 +2971,11 @@ int main(int argc, char ** argv) {
         if (!json_value(data, "stream", false)) {
             server_task_result result = ctx_server.queue_results.recv(id_task);
             if (!result.error && result.stop) {
-                res.set_content(result.data.dump(-1, ' ', false, json::error_handler_t::replace), MIMETYPE_JSON);
+                try {
+                    res.set_content(result.data.dump(-1, ' ', false, json::error_handler_t::replace), MIMETYPE_JSON);
+                } catch (const std::exception & e) {
+                    res_error(res, format_error_response(std::string("\"set_content\": ") + e.what(), ERROR_TYPE_SERVER));
+                }
             } else {
                 res_error(res, result.data);
             }
@@ -3074,8 +3073,11 @@ int main(int argc, char ** argv) {
 
             if (!result.error && result.stop) {
                 json result_oai = format_final_response_oaicompat(data, result.data, completion_id);
-
-                res.set_content(result_oai.dump(-1, ' ', false, json::error_handler_t::replace), MIMETYPE_JSON);
+                try {
+                    res.set_content(result_oai.dump(-1, ' ', false, json::error_handler_t::replace), MIMETYPE_JSON);
+                } catch (const std::exception & e) {
+                    res_error(res, format_error_response(std::string("\"set_content\": ") + e.what(), ERROR_TYPE_SERVER));
+                }
             } else {
                 res_error(res, result.data);
             }
