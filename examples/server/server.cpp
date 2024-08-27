@@ -1426,28 +1426,23 @@ struct server_context {
         res.id_multi = slot.id_multi;
         res.error    = false;
         res.stop     = true;
-        try {
-            res.data = json{
-                {"content",             !slot.params.stream ? slot.generated_text : ""},
-                {"id_slot",             slot.id},
-                {"stop",                true},
-                {"model",               params.model_alias},
-                {"tokens_predicted",    slot.n_decoded},
-                {"tokens_evaluated",    slot.n_prompt_tokens},
-                {"generation_settings", get_formated_generation(slot)},
-                {"prompt",              slot.prompt},
-                {"truncated",           slot.truncated},
-                {"stopped_eos",         slot.stopped_eos},
-                {"stopped_word",        slot.stopped_word},
-                {"stopped_limit",       slot.stopped_limit},
-                {"stopping_word",       slot.stopping_word},
-                {"tokens_cached",       slot.n_past},
-                {"timings",             slot.get_formated_timings()}
-            };
-        } catch (const std::exception & e) {
-            send_error(slot, std::string("\"send_final_response\": ") + e.what(), ERROR_TYPE_SERVER);
-            return;
-        }
+        res.data = json{
+            {"content",             !slot.params.stream ? slot.generated_text : ""},
+            {"id_slot",             slot.id},
+            {"stop",                true},
+            {"model",               params.model_alias},
+            {"tokens_predicted",    slot.n_decoded},
+            {"tokens_evaluated",    slot.n_prompt_tokens},
+            {"generation_settings", get_formated_generation(slot)},
+            {"prompt",              slot.prompt},
+            {"truncated",           slot.truncated},
+            {"stopped_eos",         slot.stopped_eos},
+            {"stopped_word",        slot.stopped_word},
+            {"stopped_limit",       slot.stopped_limit},
+            {"stopping_word",       slot.stopping_word},
+            {"tokens_cached",       slot.n_past},
+            {"timings",             slot.get_formated_timings()}
+        };
 
         if (slot.sparams.n_probs > 0) {
             std::vector<completion_token_output> probs;
@@ -2732,7 +2727,12 @@ int main(int argc, char ** argv) {
             }
         }
 
-        res.set_content(result.data.at("slots").dump(), MIMETYPE_JSON);
+        try {
+            res.set_content(result.data.at("slots").dump(), MIMETYPE_JSON);
+        } catch (const std::exception & e) {
+            res_error(res, format_error_response(std::string("\"set_content\": ") + e.what(), ERROR_TYPE_SERVER));
+            return;
+        }
         res.status = 200; // HTTP OK
     };
 
