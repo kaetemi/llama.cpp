@@ -2572,7 +2572,7 @@ int main(int argc, char ** argv) {
 
     auto res_error = [](httplib::Response & res, json error_data) {
         json final_response {{"error", error_data}};
-        res.set_content(final_response.dump(), MIMETYPE_JSON);
+        res.set_content(final_response.dump(-1, ' ', false, json::error_handler_t::replace), MIMETYPE_JSON);
         res.status = json_value(error_data, "code", 500);
     };
 
@@ -2971,11 +2971,7 @@ int main(int argc, char ** argv) {
         if (!json_value(data, "stream", false)) {
             server_task_result result = ctx_server.queue_results.recv(id_task);
             if (!result.error && result.stop) {
-                try {
-                    res.set_content(result.data.dump(-1, ' ', false, json::error_handler_t::replace), MIMETYPE_JSON);
-                } catch (const std::exception & e) {
-                    res_error(res, format_error_response(std::string("\"set_content\": ") + e.what(), ERROR_TYPE_SERVER));
-                }
+                res.set_content(result.data.dump(-1, ' ', false, json::error_handler_t::replace), MIMETYPE_JSON);
             } else {
                 res_error(res, result.data);
             }
@@ -3073,11 +3069,7 @@ int main(int argc, char ** argv) {
 
             if (!result.error && result.stop) {
                 json result_oai = format_final_response_oaicompat(data, result.data, completion_id);
-                try {
-                    res.set_content(result_oai.dump(-1, ' ', false, json::error_handler_t::replace), MIMETYPE_JSON);
-                } catch (const std::exception & e) {
-                    res_error(res, format_error_response(std::string("\"set_content\": ") + e.what(), ERROR_TYPE_SERVER));
-                }
+                res.set_content(result_oai.dump(-1, ' ', false, json::error_handler_t::replace), MIMETYPE_JSON);
             } else {
                 res_error(res, result.data);
             }
