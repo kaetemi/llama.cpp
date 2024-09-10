@@ -2182,7 +2182,7 @@ struct server_context {
                             }
                         }
 
-                        llama_batch_add(batch, prompt_tokens[slot.n_past], system_tokens.size() + slot_npast, { slot.id + 1 }, false);
+                        llama_batch_add(batch, prompt_tokens[slot.n_past], system_tokens.size() + slot_npast, { slot.id + 1 }, true);
 
                         if (slot.params.cache_prompt) {
                             slot.cache_tokens.push_back(prompt_tokens[slot.n_past]);
@@ -2330,6 +2330,20 @@ struct server_context {
 
                     // prompt evaluated for next-token prediction
                     slot.state = SLOT_STATE_GENERATING;
+                } else if (slot.state == SLOT_STATE_PROCESSING_PROMPT) {
+                    // retrieve logprobs for the prompt tokens
+                    if (batch.logits[slot.i_batch - i]) {
+                        const float * logits = llama_get_logits_ith(ctx, slot.i_batch - i);
+                        if (logits) {
+                            completion_token_output token_output;
+                            token_output.tok = batch.token[slot.i_batch - i];
+                            for (int j = 0; j < llama_n_vocab(model); j++) {
+                                token_output.probs.push_back({(llama_token)j, logits[j]});
+                            }
+                            slot.add_token_string(token_output);
+                        }
+                    }
+                    continue; // continue loop of slots
                 } else if (slot.state != SLOT_STATE_GENERATING) {
                     continue; // continue loop of slots
                 }
