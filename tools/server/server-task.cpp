@@ -67,6 +67,7 @@ json task_params::to_json(bool only_metrics) const {
             {"n_discard",                 n_discard},
             {"ignore_eos",                sampling.ignore_eos},
             {"blue_noise",                sampling.blue_noise},
+            {"rng_error_diffusion",       sampling.rng_error_diffusion},
             {"stream",                    stream},
             {"n_probs",                   sampling.n_probs},
             {"min_keep",                  sampling.min_keep},
@@ -127,6 +128,7 @@ json task_params::to_json(bool only_metrics) const {
         {"n_discard",                 n_discard},
         {"ignore_eos",                sampling.ignore_eos},
         {"blue_noise",                sampling.blue_noise},
+        {"rng_error_diffusion",       sampling.rng_error_diffusion},
         {"stream",                    stream},
         {"logit_bias",                format_logit_bias(sampling.logit_bias)},
         {"n_probs",                   sampling.n_probs},
@@ -469,7 +471,8 @@ task_params server_task::params_from_json_cmpl(
             }
         }
 
-        params.sampling.blue_noise  = json_value(data, "blue_noise",  params_base.sampling.blue_noise);
+        params.sampling.blue_noise          = json_value(data, "blue_noise",          params_base.sampling.blue_noise);
+        params.sampling.rng_error_diffusion = json_value(data, "rng_error_diffusion", params_base.sampling.rng_error_diffusion);
         params.sampling.ignore_eos = json_value(data, "ignore_eos", params_base.sampling.ignore_eos);
         if (params.sampling.ignore_eos) {
             params.sampling.logit_bias.insert(

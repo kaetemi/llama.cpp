@@ -1585,6 +1585,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_sparam());
     add_opt(common_arg(
+        {"--rng-error-diffusion"},
+        "enable temporal error diffusion in dist sampler (experimental)",
+        [](common_params & params) {
+            params.sampling.rng_error_diffusion = true;
+        }
+    ).set_sparam());
+    add_opt(common_arg(
         {"--temp"}, "N",
         string_format("temperature (default: %.2f)", (double)params.sampling.temp),
         [](common_params & params, const std::string & value) {

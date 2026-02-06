@@ -1215,6 +1215,11 @@ struct llama_sampler_dist : public llama_sampler_backend {
 
     std::unique_ptr<llama_dist_rng> rng;
 
+    bool          error_diffusion;
+    double        ed_t1; // error to apply at next timestep
+    double        ed_t2; // error to apply at timestep after next
+    std::mt19937  ed_rng; // separate RNG for error diffusion coin flip (avoids interfering with main RNG)
+
     ggml_tensor * inp_uniform;
 };
 
@@ -1264,11 +1269,20 @@ static void llama_sampler_dist_apply(struct llama_sampler * smpl, llama_token_da
     // sample from the obtained probabilities and normalize the probs in a single pass
     // this is ~3x faster on Mac with full gpt-oss vocab than the version below
     //
-    const double rnd = ctx->rng->nextf();
+    double rnd = ctx->rng->nextf();
+    double rnd_raw;
+
+    // apply accumulated error from previous timesteps
+    if (ctx->error_diffusion) {
+        rnd += ctx->ed_t1;
+        rnd_raw = rnd;
+        rnd = std::max(0.0, std::min(rnd, std::nextafter(1.0, 0.0)));
+    }
 
           double sum_run = 0.0f;
     const double sum_tgt = sum_cum*rnd;
 
+    double selected_p_unnorm = 0.0; // for error diffusion midpoint calculation
     bool found = false;
     for (size_t i = 0; i < cur_p->size; ++i) {
         if (!found) {
@@ -1276,6 +1290,7 @@ static void llama_sampler_dist_apply(struct llama_sampler * smpl, llama_token_da
             sum_run += cur_p->data[i].p;
             if (sum_run >= sum_tgt) {
                 cur_p->selected = i;
+                selected_p_unnorm = cur_p->data[i].p;
                 found = true;
             }
         }
@@ -1288,6 +1303,24 @@ static void llama_sampler_dist_apply(struct llama_sampler * smpl, llama_token_da
     assert(found);
     if (!found) {
         cur_p->selected = cur_p->size - 1;
+    }
+
+    // compute and diffuse the quantization error to future timesteps
+    if (ctx->error_diffusion && found) {
+        // midpoint of the selected token's CDF range (normalized to [0, 1))
+        const double midpoint = (sum_run - selected_p_unnorm / 2.0) / sum_cum;
+        const double new_error = rnd_raw - midpoint;
+
+        // advance error state: t2 -> t1
+        ctx->ed_t1 = ctx->ed_t2;
+        ctx->ed_t2 = 0.0;
+
+        // randomly assign new error to t+1 or t+2
+        if (ctx->ed_rng() & 1) {
+            ctx->ed_t1 += new_error;
+        } else {
+            ctx->ed_t2 += new_error;
+        }
     }
 #else
     // for clarity, this is the same as above but does one pass for normalization and one extra pass for sampling
@@ -1305,6 +1338,9 @@ static void llama_sampler_dist_reset(struct llama_sampler * smpl) {
     auto * ctx = (llama_sampler_dist *) smpl->ctx;
     ctx->seed_cur = get_rng_seed(ctx->seed);
     ctx->rng->reseed(ctx->seed_cur);
+    ctx->ed_t1 = 0.0;
+    ctx->ed_t2 = 0.0;
+    ctx->ed_rng.seed(ctx->seed_cur);
 }
 
 static struct llama_sampler * llama_sampler_dist_clone(const struct llama_sampler * smpl) {
@@ -1314,10 +1350,14 @@ static struct llama_sampler * llama_sampler_dist_clone(const struct llama_sample
         /* .iface = */ smpl->iface,
         /* .ctx   = */ new llama_sampler_dist {
             {ctx->get_name()},
-            /* .seed        = */ ctx->seed,
-            /* .seed_cur    = */ ctx->seed_cur,
-            /* .rng         = */ ctx->rng->clone(),
-            /* .inp_uniform = */ nullptr,
+            /* .seed             = */ ctx->seed,
+            /* .seed_cur         = */ ctx->seed_cur,
+            /* .rng              = */ ctx->rng->clone(),
+            /* .error_diffusion  = */ ctx->error_diffusion,
+            /* .ed_t1            = */ ctx->ed_t1,
+            /* .ed_t2            = */ ctx->ed_t2,
+            /* .ed_rng           = */ ctx->ed_rng,
+            /* .inp_uniform      = */ nullptr,
         }
     );
 }
@@ -1430,10 +1470,14 @@ struct llama_sampler * llama_sampler_init_dist(uint32_t seed) {
         /* .iface = */ &llama_sampler_dist_i,
         /* .ctx   = */ new llama_sampler_dist {
             {"dist"},
-            /* .seed        = */ seed,
-            /* .seed_cur    = */ seed_cur,
-            /* .rng         = */ std::make_unique<llama_dist_rng_white>(seed_cur),
-            /* .inp_uniform = */ nullptr,
+            /* .seed             = */ seed,
+            /* .seed_cur         = */ seed_cur,
+            /* .rng              = */ std::make_unique<llama_dist_rng_white>(seed_cur),
+            /* .error_diffusion  = */ false,
+            /* .ed_t1            = */ 0.0,
+            /* .ed_t2            = */ 0.0,
+            /* .ed_rng           = */ std::mt19937(seed_cur),
+            /* .inp_uniform      = */ nullptr,
         }
     );
 }
@@ -1444,10 +1488,50 @@ struct llama_sampler * llama_sampler_init_dist_blue_noise(uint32_t seed) {
         /* .iface = */ &llama_sampler_dist_i,
         /* .ctx   = */ new llama_sampler_dist {
             {"dist-blue-noise"},
-            /* .seed        = */ seed,
-            /* .seed_cur    = */ seed_cur,
-            /* .rng         = */ std::make_unique<llama_dist_rng_blue>(seed_cur),
-            /* .inp_uniform = */ nullptr,
+            /* .seed             = */ seed,
+            /* .seed_cur         = */ seed_cur,
+            /* .rng              = */ std::make_unique<llama_dist_rng_blue>(seed_cur),
+            /* .error_diffusion  = */ false,
+            /* .ed_t1            = */ 0.0,
+            /* .ed_t2            = */ 0.0,
+            /* .ed_rng           = */ std::mt19937(seed_cur),
+            /* .inp_uniform      = */ nullptr,
+        }
+    );
+}
+
+struct llama_sampler * llama_sampler_init_dist_error_diffusion(uint32_t seed) {
+    auto seed_cur = get_rng_seed(seed);
+    return llama_sampler_init(
+        /* .iface = */ &llama_sampler_dist_i,
+        /* .ctx   = */ new llama_sampler_dist {
+            {"dist-error-diffusion"},
+            /* .seed             = */ seed,
+            /* .seed_cur         = */ seed_cur,
+            /* .rng              = */ std::make_unique<llama_dist_rng_white>(seed_cur),
+            /* .error_diffusion  = */ true,
+            /* .ed_t1            = */ 0.0,
+            /* .ed_t2            = */ 0.0,
+            /* .ed_rng           = */ std::mt19937(seed_cur),
+            /* .inp_uniform      = */ nullptr,
+        }
+    );
+}
+
+struct llama_sampler * llama_sampler_init_dist_blue_noise_error_diffusion(uint32_t seed) {
+    auto seed_cur = get_rng_seed(seed);
+    return llama_sampler_init(
+        /* .iface = */ &llama_sampler_dist_i,
+        /* .ctx   = */ new llama_sampler_dist {
+            {"dist-blue-noise-error-diffusion"},
+            /* .seed             = */ seed,
+            /* .seed_cur         = */ seed_cur,
+            /* .rng              = */ std::make_unique<llama_dist_rng_blue>(seed_cur),
+            /* .error_diffusion  = */ true,
+            /* .ed_t1            = */ 0.0,
+            /* .ed_t2            = */ 0.0,
+            /* .ed_rng           = */ std::mt19937(seed_cur),
+            /* .inp_uniform      = */ nullptr,
         }
     );
 }
