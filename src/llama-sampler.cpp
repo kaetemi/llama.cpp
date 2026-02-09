@@ -20,6 +20,10 @@
 #include <unordered_map>
 #include <stdexcept>
 
+#if defined(_MSC_VER) && defined(_M_X64)
+#include <intrin.h>
+#endif
+
 // the ring buffer works similarly to std::deque, but with a fixed capacity
 template<typename T>
 struct ring_buffer {
@@ -609,6 +613,163 @@ struct llama_dist_rng_mt19937 : llama_dist_rng {
 
     std::unique_ptr<llama_dist_rng> clone() const override {
         return std::make_unique<llama_dist_rng_mt19937>(*this);
+    }
+};
+
+// PCG64-DXSM
+// reference: https://dotat.at/@/2023-06-21-pcg64-dxsm.html
+struct llama_dist_rng_pcg64_dxsm : llama_dist_rng {
+    struct u128 { uint64_t lo, hi; };
+
+    static constexpr uint64_t MUL_64 = 0xDA942042E4DD58B5ULL;
+
+#if 0
+    static constexpr uint64_t INC_LO = 0x14057B7EF767814FULL;
+    static constexpr uint64_t INC_HI = 0x5851F42D4C957F2DULL;
+#elif 0
+    static constexpr uint64_t INC_LO = 0xDA3E39CB94B95BDBULL;
+    static constexpr uint64_t INC_HI = 0x0000000000000001ULL;
+#endif
+
+    u128 state;
+    u128 inc;
+    u128 init_state; // saved for reset()
+
+    // 128x64 multiply
+    static u128 mul128x64(u128 a, uint64_t b) {
+#ifdef __SIZEOF_INT128__
+        // compiler has native 128-bit support (GCC, Clang)
+        unsigned __int128 full = (unsigned __int128)a.lo * b;
+        uint64_t lo = (uint64_t)full;
+        uint64_t hi = (uint64_t)(full >> 64) + a.hi * b;
+        return {lo, hi};
+#elif defined(_MSC_VER) && defined(_M_X64)
+        // MSVC on x64
+        uint64_t hi_lo;
+        uint64_t lo = _umul128(a.lo, b, &hi_lo);
+        uint64_t hi = hi_lo + a.hi * b;
+        return {lo, hi};
+#else
+        // 32-bit fallback
+        uint64_t a0 = a.lo & 0xFFFFFFFF;
+        uint64_t a1 = a.lo >> 32;
+        uint64_t b0 = b & 0xFFFFFFFF;
+        uint64_t b1 = b >> 32;
+
+        uint64_t p0 = a0 * b0;
+        uint64_t p1 = a0 * b1;
+        uint64_t p2 = a1 * b0;
+        uint64_t p3 = a1 * b1;
+
+        uint64_t mid = (p0 >> 32) + (p1 & 0xFFFFFFFF) + (p2 & 0xFFFFFFFF);
+        uint64_t lo  = (p0 & 0xFFFFFFFF) | (mid << 32);
+        uint64_t hi  = p3 + (p1 >> 32) + (p2 >> 32) + (mid >> 32) + a.hi * b;
+
+        return {lo, hi};
+#endif
+    }
+
+    static u128 add128(u128 a, u128 b) {
+        uint64_t lo = a.lo + b.lo;
+        uint64_t hi = a.hi + b.hi + (lo < a.lo ? 1 : 0);
+        return {lo, hi};
+    }
+
+    void step() {
+        state = add128(mul128x64(state, MUL_64), inc);
+    }
+
+    uint64_t output() const {
+        uint64_t hi = state.hi;
+        uint64_t lo = state.lo | 1;
+        hi ^= hi >> 32;
+        hi *= MUL_64;
+        hi ^= hi >> 48;
+        hi *= lo;
+        return hi;
+    }
+
+    static uint32_t lowbias32(uint32_t x) {
+        x ^= x >> 16; x *= 0x21f0aaad;
+        x ^= x >> 15; x *= 0x735a2d97;
+        x ^= x >> 15;
+        return x;
+    }
+
+    void seed_init(uint32_t seed) {
+#if 0
+        // fixed increment — all seeds share the same stream
+        uint64_t s_lo = (uint64_t)seed;
+        uint64_t s_hi = 0;
+        inc = {INC_LO, INC_HI};
+#elif 0
+        // note: for numpy compatibility, this should use seed_seq_fe from the following gist rather than std::seed_seq
+        // https://gist.githubusercontent.com/imneme/540829265469e673d045/raw/5afb4439c23a6c060eda72121bff8bf9da59591a/randutils.hpp
+        std::seed_seq seq{seed}; // std::seed_seq gives poor quality output
+        uint32_t vals[8];
+        seq.generate(vals, vals + 8);
+
+        uint64_t s_lo = (uint64_t)vals[1] << 32 | vals[0];
+        uint64_t s_hi = (uint64_t)vals[3] << 32 | vals[2];
+        uint64_t i_lo = (uint64_t)vals[5] << 32 | vals[4];
+        uint64_t i_hi = (uint64_t)vals[7] << 32 | vals[6];
+
+        inc = { (i_lo << 1) | 1, (i_hi << 1) | (i_lo >> 63) };
+#else
+        // use lowbias32 as seed sequencer to expand 32-bit seed into 256 bits
+        uint32_t vals[8];
+        for (int i = 0; i < 8; i++) {
+            vals[i] = lowbias32(seed + (uint32_t)i);
+        }
+
+        uint64_t s_lo = (uint64_t)vals[1] << 32 | vals[0];
+        uint64_t s_hi = (uint64_t)vals[3] << 32 | vals[2];
+        uint64_t i_lo = (uint64_t)vals[5] << 32 | vals[4];
+        uint64_t i_hi = (uint64_t)vals[7] << 32 | vals[6];
+
+        inc = { (i_lo << 1) | 1, (i_hi << 1) | (i_lo >> 63) };
+#endif
+        state = {0, 0};
+        step();
+        state = add128(state, {s_lo, s_hi});
+        step();
+        init_state = state;
+    }
+
+    llama_dist_rng_pcg64_dxsm(uint32_t seed) {
+        seed_init(seed);
+    }
+
+    bool requires_sorted() override { return false; }
+
+    uint64_t next_raw() {
+        uint64_t out = output();
+        step();
+        return out;
+    }
+
+    uint32_t next32() override {
+        return (uint32_t)(next_raw() >> 32);
+    }
+
+    uint64_t next64() override {
+        return next_raw();
+    }
+
+    double nextf() override {
+        return (next_raw() >> 11) * 0x1.0p-53;
+    }
+
+    void reseed(uint32_t s) override {
+        seed_init(s);
+    }
+
+    void reset() override {
+        state = init_state;
+    }
+
+    std::unique_ptr<llama_dist_rng> clone() const override {
+        return std::make_unique<llama_dist_rng_pcg64_dxsm>(*this);
     }
 };
 
@@ -1571,9 +1732,10 @@ static struct llama_sampler_i llama_sampler_dist_i = {
 
 static std::unique_ptr<llama_dist_rng> make_dist_rng(uint32_t seed, enum llama_rng_type rng_type) {
     switch (rng_type) {
-        case LLAMA_RNG_TYPE_LOWBIAS32: return std::make_unique<llama_dist_rng_lowbias32>(seed);
+        case LLAMA_RNG_TYPE_LOWBIAS32:  return std::make_unique<llama_dist_rng_lowbias32>(seed);
+        case LLAMA_RNG_TYPE_PCG64_DXSM: return std::make_unique<llama_dist_rng_pcg64_dxsm>(seed);
         case LLAMA_RNG_TYPE_MT19937:
-        default:                       return std::make_unique<llama_dist_rng_mt19937>(seed);
+        default:                        return std::make_unique<llama_dist_rng_mt19937>(seed);
     }
 }
 

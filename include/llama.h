@@ -189,8 +189,9 @@ extern "C" {
     LLAMA_API const char * llama_flash_attn_type_name(enum llama_flash_attn_type flash_attn_type);
 
     enum llama_rng_type {
-        LLAMA_RNG_TYPE_MT19937   = 0,
-        LLAMA_RNG_TYPE_LOWBIAS32 = 1,
+        LLAMA_RNG_TYPE_MT19937    = 0,
+        LLAMA_RNG_TYPE_LOWBIAS32  = 1,
+        LLAMA_RNG_TYPE_PCG64_DXSM = 2,
     };
 
     enum llama_split_mode {
